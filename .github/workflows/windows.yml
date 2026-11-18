@@ -1,0 +1,40 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo +stable fmt --all
+      - run: cargo +stable test --release
+      - run: cargo +stable build --release --locked
+      - name: Verify GUI executable
+        run: |
+          $binary = [IO.File]::ReadAllBytes("target/release/auto-typer.exe")
+          $pe = [BitConverter]::ToInt32($binary, 0x3c)
+          if ([BitConverter]::ToUInt16($binary, $pe + 24 + 68) -ne 2) {
+            throw "The release executable must use the Windows GUI subsystem."
+          }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: AutoTyper-windows-x64
+          path: target/release/auto-typer.exe
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-sources
+          path: |
+            Cargo.lock
+            src/main.rs
+          if-no-files-found: error
