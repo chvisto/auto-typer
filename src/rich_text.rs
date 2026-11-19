@@ -75,7 +75,8 @@ impl std::ops::Deref for Document {
 impl Document {
     pub fn push(&mut self, text: &str, style: Style) {
         self.text.push_str(text);
-        self.styles.extend(std::iter::repeat_n(style, text.chars().count()));
+        self.styles
+            .extend(std::iter::repeat_n(style, text.chars().count()));
     }
 
     pub fn append_document(&mut self, other: Self) {

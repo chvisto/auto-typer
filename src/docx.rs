@@ -1,9 +1,19 @@
-use std::{collections::HashMap, ffi::OsString, fs::File, io::Read, os::windows::ffi::OsStringExt, path::{Path, PathBuf}};
+use std::{
+    collections::HashMap,
+    ffi::OsString,
+    fs::File,
+    io::Read,
+    os::windows::ffi::OsStringExt,
+    path::{Path, PathBuf},
+};
 
 use roxmltree::{Document as Xml, Node};
 use windows_sys::Win32::{
     Foundation::HWND,
-    UI::Controls::Dialogs::{CommDlgExtendedError, GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OPENFILENAMEW},
+    UI::Controls::Dialogs::{
+        CommDlgExtendedError, GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
+        OPENFILENAMEW,
+    },
 };
 use zip::{ZipArchive, result::ZipError};
 
@@ -16,7 +26,9 @@ const STRICT_WORDML: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";
 
 pub fn choose(owner: HWND) -> Result<Option<PathBuf>, String> {
     let mut path = vec![0u16; 32768];
-    let filter: Vec<u16> = "Word documents (*.docx)\0*.docx\0\0".encode_utf16().collect();
+    let filter: Vec<u16> = "Word documents (*.docx)\0*.docx\0\0"
+        .encode_utf16()
+        .collect();
     let title: Vec<u16> = "Import Word document\0".encode_utf16().collect();
     let mut dialog = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
@@ -40,15 +52,23 @@ pub fn choose(owner: HWND) -> Result<Option<PathBuf>, String> {
 }
 
 pub fn read(path: &Path) -> Result<Document, String> {
-    if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("docx")) {
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("docx"))
+    {
         return Err("Choose a Word .docx document.".into());
     }
     let file = File::open(path).map_err(|_| "Could not open the Word document.")?;
-    if file.metadata().map_err(|_| "Could not read the Word document.")?.len() > ARCHIVE_LIMIT {
+    if file
+        .metadata()
+        .map_err(|_| "Could not read the Word document.")?
+        .len()
+        > ARCHIVE_LIMIT
+    {
         return Err("The Word document exceeds 128 MB.".into());
     }
-    let mut archive = ZipArchive::new(file)
-        .map_err(|_| "The file is not a readable Word .docx document.")?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|_| "The file is not a readable Word .docx document.")?;
     let main = part(&mut archive, "word/document.xml")?
         .ok_or("The file is missing the Word document body.")?;
     let styles = part(&mut archive, "word/styles.xml")?;
@@ -65,7 +85,8 @@ fn part(archive: &mut ZipArchive<File>, name: &str) -> Result<Option<String>, St
         return Err("The Word document contains too much text to import.".into());
     }
     let mut xml = String::new();
-    part.take(XML_LIMIT + 1).read_to_string(&mut xml)
+    part.take(XML_LIMIT + 1)
+        .read_to_string(&mut xml)
         .map_err(|_| "The Word document contains unreadable text.")?;
     if xml.len() as u64 > XML_LIMIT {
         return Err("The Word document contains too much text to import.".into());
@@ -83,7 +104,8 @@ fn child<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Option<Node<'a, 'inp
 }
 
 fn attr<'a>(node: Node<'a, '_>, name: &str) -> Option<&'a str> {
-    node.attribute((WORDML, name)).or_else(|| node.attribute((STRICT_WORDML, name)))
+    node.attribute((WORDML, name))
+        .or_else(|| node.attribute((STRICT_WORDML, name)))
 }
 
 fn val<'a>(node: Node<'a, '_>, name: &str) -> Option<&'a str> {
@@ -105,9 +127,13 @@ fn inline(style: &mut Style, props: Node<'_, '_>, inherited: bool) {
 
 fn parse(main: &str, styles: Option<&str>) -> Result<Document, String> {
     let main = Xml::parse(main).map_err(|_| "The Word document body is invalid.")?;
-    let styles = styles.map(Xml::parse).transpose()
+    let styles = styles
+        .map(Xml::parse)
+        .transpose()
         .map_err(|_| "The Word document styles are invalid.")?;
-    let definitions: HashMap<_, _> = styles.as_ref().into_iter()
+    let definitions: HashMap<_, _> = styles
+        .as_ref()
+        .into_iter()
         .flat_map(|xml| xml.root_element().children())
         .filter(|&node| word(node, "style"))
         .filter_map(|node| Some((attr(node, "styleId")?, node)))
@@ -115,26 +141,39 @@ fn parse(main: &str, styles: Option<&str>) -> Result<Document, String> {
     let default = definitions.values().copied().find(|&style| {
         attr(style, "type") == Some("paragraph") && attr(style, "default").is_some_and(enabled)
     });
-    let doc_defaults = styles.as_ref()
+    let doc_defaults = styles
+        .as_ref()
         .and_then(|xml| child(xml.root_element(), "docDefaults"))
         .and_then(|node| child(node, "rPrDefault"))
         .and_then(|node| child(node, "rPr"));
-    let body = child(main.root_element(), "body").ok_or("The file is missing the Word document body.")?;
+    let body =
+        child(main.root_element(), "body").ok_or("The file is missing the Word document body.")?;
     let mut document = Document::default();
     let mut first = true;
-    let visible = |node: Node<'_, '_>| !node.ancestors().any(|node| {
-        word(node, "del") || word(node, "moveFrom") || word(node, "txbxContent")
-    });
-    for paragraph in body.descendants().filter(|&node| word(node, "p") && visible(node)) {
+    let visible = |node: Node<'_, '_>| {
+        !node
+            .ancestors()
+            .any(|node| word(node, "del") || word(node, "moveFrom") || word(node, "txbxContent"))
+    };
+    for paragraph in body
+        .descendants()
+        .filter(|&node| word(node, "p") && visible(node))
+    {
         if !first {
             document.push("\n", Style::default());
         }
         first = false;
         let props = child(paragraph, "pPr");
         let style_id = props.and_then(|node| val(node, "pStyle"));
-        let style = style_id.and_then(|id| definitions.get(id).copied()).or(default);
-        let levels = |node| val(node, "outlineLvl").and_then(|n| n.parse::<u8>().ok())
-            .filter(|&n| n < 9).map(|n| Heading::Level(n + 1));
+        let style = style_id
+            .and_then(|id| definitions.get(id).copied())
+            .or(default);
+        let levels = |node| {
+            val(node, "outlineLvl")
+                .and_then(|n| n.parse::<u8>().ok())
+                .filter(|&n| n < 9)
+                .map(|n| Heading::Level(n + 1))
+        };
         let resolve = |start| {
             let mut chain = Vec::new();
             let mut next = start;
@@ -148,27 +187,45 @@ fn parse(main: &str, styles: Option<&str>) -> Result<Document, String> {
             chain
         };
         let chain = resolve(style);
-        let named = |node| val(node, "name").and_then(heading_kind)
-            .or_else(|| attr(node, "styleId").and_then(heading_kind))
-            .or_else(|| child(node, "pPr").and_then(levels));
-        let heading = props.and_then(levels)
+        let named = |node| {
+            val(node, "name")
+                .and_then(heading_kind)
+                .or_else(|| attr(node, "styleId").and_then(heading_kind))
+                .or_else(|| child(node, "pPr").and_then(levels))
+        };
+        let heading = props
+            .and_then(levels)
             .or_else(|| style_id.and_then(heading_kind))
             .or_else(|| chain.iter().copied().find_map(named))
             .unwrap_or_default();
-        let mut base = Style { heading, ..Default::default() };
+        let mut base = Style {
+            heading,
+            ..Default::default()
+        };
         if heading == Heading::Body {
             if let Some(props) = doc_defaults {
                 inline(&mut base, props, false);
             }
-            for props in chain.into_iter().rev().filter_map(|node| child(node, "rPr")) {
+            for props in chain
+                .into_iter()
+                .rev()
+                .filter_map(|node| child(node, "rPr"))
+            {
                 inline(&mut base, props, true);
             }
         }
-        for run in paragraph.descendants().filter(|&node| word(node, "r") && visible(node)) {
+        for run in paragraph
+            .descendants()
+            .filter(|&node| word(node, "r") && visible(node))
+        {
             let mut style = base;
             if let Some(props) = child(run, "rPr") {
                 let character = val(props, "rStyle").and_then(|id| definitions.get(id).copied());
-                for props in resolve(character).into_iter().rev().filter_map(|node| child(node, "rPr")) {
+                for props in resolve(character)
+                    .into_iter()
+                    .rev()
+                    .filter_map(|node| child(node, "rPr"))
+                {
                     inline(&mut style, props, true);
                 }
                 inline(&mut style, props, false);
@@ -201,16 +258,20 @@ mod tests {
 
     #[test]
     fn imports_named_and_inherited_headings_and_inline_runs() {
-        let main = format!(r#"<w:document xmlns:w="{WORDML}"><w:body>
+        let main = format!(
+            r#"<w:document xmlns:w="{WORDML}"><w:body>
             <w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>
             <w:p><w:pPr><w:pStyle w:val="Custom"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>
             <w:p><w:r><w:rPr><w:rStyle w:val="Both"/><w:i w:val="off"/></w:rPr><w:t>Bold</w:t></w:r><w:r><w:tab/><w:t>ordinary</w:t><w:br/></w:r><w:r><w:rPr><w:rStyle w:val="Both"/></w:rPr><w:t>Café</w:t></w:r></w:p>
-        </w:body></w:document>"#);
-        let styles = format!(r#"<w:styles xmlns:w="{WORDML}">
+        </w:body></w:document>"#
+        );
+        let styles = format!(
+            r#"<w:styles xmlns:w="{WORDML}">
             <w:style w:type="paragraph" w:styleId="Custom"><w:basedOn w:val="Heading9"/></w:style>
             <w:style w:type="paragraph" w:styleId="Heading9"><w:name w:val="heading 9"/></w:style>
             <w:style w:type="character" w:styleId="Both"><w:rPr><w:b/><w:i/></w:rPr></w:style>
-        </w:styles>"#);
+        </w:styles>"#
+        );
         let doc = parse(&main, Some(&styles)).unwrap();
         assert!(&*doc == "Title\nHeading\nBold\tordinary\nCafé");
         assert_eq!(doc.styles()[0].heading, Heading::Title);
