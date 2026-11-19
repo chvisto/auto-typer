@@ -194,7 +194,12 @@ impl Options {
         }
         let thinking = if self.natural_thinking {
             let [minimum, maximum] = self.thinking_seconds;
-            if !minimum.is_finite() || !maximum.is_finite() || minimum < 0.1 || maximum > 600.0 || minimum > maximum {
+            if !minimum.is_finite()
+                || !maximum.is_finite()
+                || minimum < 0.1
+                || maximum > 600.0
+                || minimum > maximum
+            {
                 return Err("Enter an ordered thinking range between 0.1 and 600 seconds.".into());
             }
             Some(self.thinking_seconds.map(Duration::from_secs_f64))
@@ -562,9 +567,13 @@ impl Schedule {
     }
 
     fn typing_interval(&self, index: usize) -> Duration {
-        self.typing_deadlines.get(index).map_or(Duration::ZERO, |&end| {
-            end - index.checked_sub(1).map_or(Duration::ZERO, |previous| self.typing_deadlines[previous])
-        })
+        self.typing_deadlines
+            .get(index)
+            .map_or(Duration::ZERO, |&end| {
+                end - index
+                    .checked_sub(1)
+                    .map_or(Duration::ZERO, |previous| self.typing_deadlines[previous])
+            })
     }
 
     fn thinking_at(&self, index: usize, left: Duration, spent: Duration) -> Option<Instant> {
@@ -1171,7 +1180,11 @@ impl AutoTyper {
         }
 
         let status = match &self.status {
-            Status::Ready | Status::Typing | Status::Thinking | Status::Completed | Status::Countdown(_) => None,
+            Status::Ready
+            | Status::Typing
+            | Status::Thinking
+            | Status::Completed
+            | Status::Countdown(_) => None,
             Status::Starting => Some("Starting…"),
             Status::FocusPaused => Some("Focus the original target to resume"),
             Status::Stopping => Some("Stopping…"),
@@ -1526,7 +1539,9 @@ fn thinking_length([minimum, maximum]: [Duration; 2]) -> Duration {
     if minimum == maximum {
         minimum
     } else {
-        Duration::from_secs_f64(rand::random_range(minimum.as_secs_f64()..=maximum.as_secs_f64()))
+        Duration::from_secs_f64(rand::random_range(
+            minimum.as_secs_f64()..=maximum.as_secs_f64(),
+        ))
     }
 }
 
@@ -1596,7 +1611,8 @@ fn run_job(
     report(Update::Status(Status::Typing));
     while sent < text.len() {
         let due = schedule.next(next);
-        let thinking_at = thinking_left.and_then(|left| schedule.thinking_at(next, left, thinking_spent));
+        let thinking_at =
+            thinking_left.and_then(|left| schedule.thinking_at(next, left, thinking_spent));
         let check_focus = Instant::now() + Duration::from_millis(125);
         let deadline = if focus_paused {
             check_focus
@@ -1621,7 +1637,9 @@ fn run_job(
                     ) {
                         Ok(updated) => {
                             schedule = updated;
-                            thinking_left = requested.thinking.map(|_| thinking_left.unwrap_or_else(next_thinking_interval));
+                            thinking_left = requested
+                                .thinking
+                                .map(|_| thinking_left.unwrap_or_else(next_thinking_interval));
                             thinking_spent = Duration::ZERO;
                             timing = requested;
                             next = 0;
@@ -1680,8 +1698,13 @@ fn run_job(
                 None
             } else {
                 let Ok(updated) = Schedule::plan(
-                    text, natural.as_deref().unwrap_or_default(), timing, started,
-                    end, wall_now + length, previous,
+                    text,
+                    natural.as_deref().unwrap_or_default(),
+                    timing,
+                    started,
+                    end,
+                    wall_now + length,
+                    previous,
                 ) else {
                     continue;
                 };
@@ -1737,7 +1760,11 @@ fn run_job(
         };
         result.map_err(|error| format!("Keyboard input failed. {error}"))?;
         if let Some(left) = &mut thinking_left {
-            *left = left.saturating_sub(schedule.typing_interval(next).saturating_sub(thinking_spent));
+            *left = left.saturating_sub(
+                schedule
+                    .typing_interval(next)
+                    .saturating_sub(thinking_spent),
+            );
         }
         thinking_spent = Duration::ZERO;
         previous = Some((sent, Instant::now()));
@@ -2334,14 +2361,23 @@ mod tests {
                 thinking: Some(range),
             };
             let schedule = Schedule::plan(
-                &text, &[], timing, start, start, SystemTime::UNIX_EPOCH, None,
-            ).unwrap();
+                &text,
+                &[],
+                timing,
+                start,
+                start,
+                SystemTime::UNIX_EPOCH,
+                None,
+            )
+            .unwrap();
             let mut left = Duration::from_millis(6050);
-            let at = (0..text.len()).find_map(|index| {
-                let at = schedule.thinking_at(index, left, Duration::ZERO);
-                left = left.saturating_sub(schedule.typing_interval(index));
-                at
-            }).unwrap();
+            let at = (0..text.len())
+                .find_map(|index| {
+                    let at = schedule.thinking_at(index, left, Duration::ZERO);
+                    left = left.saturating_sub(schedule.typing_interval(index));
+                    at
+                })
+                .unwrap();
             assert_eq!(at - start, Duration::from_millis(10050));
         }
     }
@@ -2363,6 +2399,10 @@ mod tests {
                 .unwrap(),
             Wait::Stop
         );
-        assert!(!events.wait_through(Instant::now() + Duration::from_secs(10)).unwrap());
+        assert!(
+            !events
+                .wait_through(Instant::now() + Duration::from_secs(10))
+                .unwrap()
+        );
     }
 }
