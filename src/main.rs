@@ -685,20 +685,29 @@ impl AutoTyper {
         let remaining = end.saturating_duration_since(Instant::now()).as_secs_f32();
         let fraction = (remaining / self.options.countdown.max(1) as f32).clamp(0.0, 1.0);
         let center = bounds.center() - egui::vec2(0.0, 28.0);
-        let number_rect = egui::Rect::from_center_size(center - egui::vec2(0.0, 26.0), egui::vec2(238.0, 115.0));
+        let number_rect =
+            egui::Rect::from_center_size(center - egui::vec2(0.0, 26.0), egui::vec2(238.0, 115.0));
         ui.scope_builder(
-            egui::UiBuilder::new().max_rect(number_rect)
-                .layout(egui::Layout::centered_and_justified(egui::Direction::TopDown)),
+            egui::UiBuilder::new().max_rect(number_rect).layout(
+                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+            ),
             |ui| {
-                ui.add(egui::Label::new(emphasis(format!("{:02}", remaining.ceil() as u32), 96.0))
-                    .selectable(false));
+                ui.add(
+                    egui::Label::new(emphasis(format!("{:02}", remaining.ceil() as u32), 96.0))
+                        .selectable(false),
+                );
             },
         );
-        let track = egui::Rect::from_center_size(center + egui::vec2(0.0, 42.0), egui::vec2(120.0, 2.0));
+        let track =
+            egui::Rect::from_center_size(center + egui::vec2(0.0, 42.0), egui::vec2(120.0, 2.0));
         ui.painter().rect_filled(track, 1, Color32::from_gray(76));
         ui.painter().rect_filled(
-            egui::Rect::from_min_size(track.min, egui::vec2(track.width() * fraction, track.height())),
-            1, WHITE,
+            egui::Rect::from_min_size(
+                track.min,
+                egui::vec2(track.width() * fraction, track.height()),
+            ),
+            1,
+            WHITE,
         );
         let caption = egui::Rect::from_min_max(
             egui::pos2(bounds.left() + 18.0, center.y + 61.0),
@@ -726,9 +735,17 @@ impl AutoTyper {
         let editor_label = compact_row(ui, 27.0, |ui| {
             let label = ui.label(emphasis("Text", 17.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.checkbox(&mut self.always_on_top, "Always on top").changed() {
-                    let level = if self.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+                if ui
+                    .checkbox(&mut self.always_on_top, "Always on top")
+                    .changed()
+                {
+                    let level = if self.always_on_top {
+                        egui::WindowLevel::AlwaysOnTop
+                    } else {
+                        egui::WindowLevel::Normal
+                    };
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
                 }
             });
             label.id
@@ -746,27 +763,44 @@ impl AutoTyper {
                         .max_height(text_height)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let response = ui.add(egui::TextEdit::multiline(&mut self.text)
-                                .desired_rows(3)
-                                .desired_width(f32::INFINITY)
-                                .hint_text("Paste or type the text to send")
-                                .frame(egui::Frame::new())).labelled_by(editor_label);
+                            let response = ui
+                                .add(
+                                    egui::TextEdit::multiline(&mut self.text)
+                                        .desired_rows(3)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("Paste or type the text to send")
+                                        .frame(egui::Frame::new()),
+                                )
+                                .labelled_by(editor_label);
                             if response.changed() && self.text.contains('\r') {
                                 self.text = self.text.replace("\r\n", "\n").replace('\r', "\n");
                             }
                             response
-                        }).inner;
+                        })
+                        .inner;
                     ui.separator();
                     compact_row(ui, 20.0, |ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(format!("{} words  ·  {} characters",
-                                self.text.split_whitespace().count(), self.text.chars().count())).weak().size(12.0));
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} words  ·  {} characters",
+                                    self.text.split_whitespace().count(),
+                                    self.text.chars().count()
+                                ))
+                                .weak()
+                                .size(12.0),
+                            );
                         });
                     });
                     response
                 });
             if frame.inner.has_focus() {
-                ui.painter().rect_stroke(frame.response.rect, 9, Stroke::new(1.0, MUTED), egui::StrokeKind::Inside);
+                ui.painter().rect_stroke(
+                    frame.response.rect,
+                    9,
+                    Stroke::new(1.0, MUTED),
+                    egui::StrokeKind::Inside,
+                );
             }
         });
     }
@@ -831,11 +865,17 @@ impl AutoTyper {
                 }
             } else {
                 let label = ui.label(RichText::new("Countdown").weak());
-                ui.add(egui::DragValue::new(&mut self.options.countdown)
-                    .range(1..=60).suffix(" s")).labelled_by(label.id);
+                ui.add(
+                    egui::DragValue::new(&mut self.options.countdown)
+                        .range(1..=60)
+                        .suffix(" s"),
+                )
+                .labelled_by(label.id);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add_enabled(!self.text.is_empty(), primary("Start typing"))
-                        .on_hover_text("Ctrl+Enter").clicked()
+                    if ui
+                        .add_enabled(!self.text.is_empty(), primary("Start typing"))
+                        .on_hover_text("Ctrl+Enter")
+                        .clicked()
                     {
                         self.prepare_start(ui.ctx());
                     }
@@ -940,11 +980,16 @@ fn compact_row<R>(ui: &mut egui::Ui, height: f32, add: impl FnOnce(&mut egui::Ui
         egui::vec2(ui.available_width(), height),
         egui::Layout::left_to_right(egui::Align::Center),
         add,
-    ).inner
+    )
+    .inner
 }
 
 fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
-    let choices = [(TimingMode::Wpm, "Pace"), (TimingMode::Duration, "Duration"), (TimingMode::FinishAt, "Finish by")];
+    let choices = [
+        (TimingMode::Wpm, "Pace"),
+        (TimingMode::Duration, "Duration"),
+        (TimingMode::FinishAt, "Finish by"),
+    ];
     let label = match options.mode {
         TimingMode::Wpm => "Pace",
         TimingMode::Duration => "Duration",
@@ -959,26 +1004,42 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
                 for (mode, label) in choices {
                     ui.selectable_value(&mut options.mode, mode, label);
                 }
-            }).response.labelled_by(timing.id);
+            })
+            .response
+            .labelled_by(timing.id);
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            match options.mode {
+        ui.with_layout(
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| match options.mode {
                 TimingMode::Wpm => {
-                    ui.add(egui::DragValue::new(&mut options.wpm).range(1..=600).suffix(" WPM"));
+                    ui.add(
+                        egui::DragValue::new(&mut options.wpm)
+                            .range(1..=600)
+                            .suffix(" WPM"),
+                    );
                     ui.label(RichText::new("Speed").weak());
                 }
                 TimingMode::Duration => {
-                    ui.add(egui::DragValue::new(&mut options.total_seconds).range(0.1..=86_400.0)
-                        .speed(0.1).fixed_decimals(1).suffix(" s"));
+                    ui.add(
+                        egui::DragValue::new(&mut options.total_seconds)
+                            .range(0.1..=86_400.0)
+                            .speed(0.1)
+                            .fixed_decimals(1)
+                            .suffix(" s"),
+                    );
                     ui.label(RichText::new("Typing time").weak());
                 }
                 TimingMode::FinishAt => {
-                    ui.add(egui::TextEdit::singleline(&mut options.finish_at)
-                        .desired_width(82.0).font(egui::TextStyle::Monospace).hint_text("HH:MM:SS"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut options.finish_at)
+                            .desired_width(82.0)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("HH:MM:SS"),
+                    );
                     ui.label(RichText::new("Local time").weak());
                 }
-            }
-        });
+            },
+        );
     });
     if options.mode == TimingMode::FinishAt {
         let now = Local::now();
@@ -995,29 +1056,44 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
     }
 
     let names = ["Periods", "Commas", "New lines"];
-    let enabled = options.pauses.iter().zip(names).filter(|(pause, _)| pause.enabled);
+    let enabled = options
+        .pauses
+        .iter()
+        .zip(names)
+        .filter(|(pause, _)| pause.enabled);
     let summary = match enabled.clone().count() {
         0 => "Off".to_owned(),
-        1 => enabled.map(|(pause, name)| format!("{name} · {:.1} s", pause.seconds)).next().unwrap(),
+        1 => enabled
+            .map(|(pause, name)| format!("{name} · {:.1} s", pause.seconds))
+            .next()
+            .unwrap(),
         count => format!("{count} enabled"),
     };
-    let button = ui.add(egui::Button::new(format!("Pauses    {summary}"))
-        .min_size(egui::vec2(ui.available_width(), 31.0)));
+    let button = ui.add(
+        egui::Button::new(format!("Pauses    {summary}"))
+            .min_size(egui::vec2(ui.available_width(), 31.0)),
+    );
     egui::Popup::from_toggle_button_response(&button)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-        ui.set_width(216.0);
-        for (pause, label) in options.pauses.iter_mut().zip(names) {
-            compact_row(ui, 28.0, |ui| {
-                let checkbox = ui.checkbox(&mut pause.enabled, label);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_enabled(pause.enabled, egui::DragValue::new(&mut pause.seconds)
-                        .range(0.0..=600.0).speed(0.1).fixed_decimals(1).suffix(" s"))
+            ui.set_width(216.0);
+            for (pause, label) in options.pauses.iter_mut().zip(names) {
+                compact_row(ui, 28.0, |ui| {
+                    let checkbox = ui.checkbox(&mut pause.enabled, label);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_enabled(
+                            pause.enabled,
+                            egui::DragValue::new(&mut pause.seconds)
+                                .range(0.0..=600.0)
+                                .speed(0.1)
+                                .fixed_decimals(1)
+                                .suffix(" s"),
+                        )
                         .labelled_by(checkbox.id);
+                    });
                 });
-            });
-        }
-    });
+            }
+        });
 }
 
 fn blurred_backdrop(source: &egui::ColorImage) -> egui::ColorImage {
@@ -1247,20 +1323,43 @@ mod tests {
                     for mode in [TimingMode::Wpm, TimingMode::Duration, TimingMode::FinishAt] {
                         let ctx = egui::Context::default();
                         set_typography(&ctx);
-                        let mut app = AutoTyper { text: text.clone(), ..AutoTyper::default() };
+                        let mut app = AutoTyper {
+                            text: text.clone(),
+                            ..AutoTyper::default()
+                        };
                         app.options.mode = mode;
                         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size.into());
-                        let mut input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
-                        input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().native_pixels_per_point = Some(scale);
+                        let mut input = egui::RawInput {
+                            screen_rect: Some(screen),
+                            ..Default::default()
+                        };
+                        input
+                            .viewports
+                            .get_mut(&egui::ViewportId::ROOT)
+                            .unwrap()
+                            .native_pixels_per_point = Some(scale);
                         ctx.run_ui(input.clone(), |ui| app.show(ui));
                         let output = ctx.run_ui(input, |ui| app.show(ui));
-                        for label in ["Timing", "Pauses    Periods · 5.0 s", "Countdown", "Start typing"] {
-                            assert!(output.shapes.iter().any(|clipped| {
-                                let Shape::Text(text) = &clipped.shape else { return false; };
-                                text.galley.text() == label
-                                    && clipped.clip_rect.intersect(screen).expand(1.0)
-                                        .contains_rect(clipped.shape.visual_bounding_rect())
-                            }), "missing or clipped {label} at {size:?}, {scale}x");
+                        for label in [
+                            "Timing",
+                            "Pauses    Periods · 5.0 s",
+                            "Countdown",
+                            "Start typing",
+                        ] {
+                            assert!(
+                                output.shapes.iter().any(|clipped| {
+                                    let Shape::Text(text) = &clipped.shape else {
+                                        return false;
+                                    };
+                                    text.galley.text() == label
+                                        && clipped
+                                            .clip_rect
+                                            .intersect(screen)
+                                            .expand(1.0)
+                                            .contains_rect(clipped.shape.visual_bounding_rect())
+                                }),
+                                "missing or clipped {label} at {size:?}, {scale}x"
+                            );
                         }
                     }
                 }
