@@ -184,7 +184,11 @@ impl Options {
         let pace = match self.mode {
             TimingMode::Wpm => Pace::Wpm(
                 self.wpm,
-                if self.exhausted_typing { self.exhaustion_reduction } else { 0 },
+                if self.exhausted_typing {
+                    self.exhaustion_reduction
+                } else {
+                    0
+                },
             ),
             TimingMode::Duration => Pace::Duration(
                 Duration::try_from_secs_f64(self.total_seconds)
@@ -1597,7 +1601,10 @@ impl Fatigue {
         } else {
             rand::random_range(12.0..24.0)
         };
-        Self { tired, remaining: Duration::from_secs_f64(seconds) }
+        Self {
+            tired,
+            remaining: Duration::from_secs_f64(seconds),
+        }
     }
 
     fn advance(&mut self, elapsed: Duration) -> bool {
@@ -1796,10 +1803,19 @@ fn run_job(
                 thinking_spent = Duration::ZERO;
             } else {
                 let elapsed = Instant::now().saturating_duration_since(now);
-                if fatigue.as_mut().is_some_and(|phase| phase.tired && phase.advance(elapsed)) {
+                if fatigue
+                    .as_mut()
+                    .is_some_and(|phase| phase.tired && phase.advance(elapsed))
+                {
                     schedule = Schedule::plan(
-                        text, natural.as_deref().unwrap_or_default(), timing, started,
-                        Instant::now(), SystemTime::now(), previous, false,
+                        text,
+                        natural.as_deref().unwrap_or_default(),
+                        timing,
+                        started,
+                        Instant::now(),
+                        SystemTime::now(),
+                        previous,
+                        false,
                     )?;
                     next = 0;
                     thinking_spent = Duration::ZERO;
@@ -1854,7 +1870,9 @@ fn run_job(
         thinking_spent = Duration::ZERO;
         let phase_changed = fatigue.as_mut().is_some_and(|phase| {
             let elapsed = if phase.tired {
-                let before = next.checked_sub(1).map_or(Duration::ZERO, |index| schedule.deadlines[index]);
+                let before = next
+                    .checked_sub(1)
+                    .map_or(Duration::ZERO, |index| schedule.deadlines[index]);
                 schedule.deadlines[next] - before
             } else {
                 schedule.typing_interval(next)
@@ -1867,8 +1885,13 @@ fn run_job(
         report(Update::Progress(sent));
         if phase_changed && sent < text.len() {
             schedule = Schedule::plan(
-                text, natural.as_deref().unwrap_or_default(), timing, started,
-                Instant::now(), SystemTime::now(), previous,
+                text,
+                natural.as_deref().unwrap_or_default(),
+                timing,
+                started,
+                Instant::now(),
+                SystemTime::now(),
+                previous,
                 fatigue.is_some_and(|phase| phase.tired),
             )?;
             next = 0;
@@ -2494,11 +2517,21 @@ mod tests {
     #[test]
     fn exhaustion_is_pace_only_and_cycles_back_to_full_efficiency() {
         let mut options = Options::default();
-        assert_eq!(options.timing(Local::now()).unwrap().pace.exhaustion_reduction(), 0);
+        assert_eq!(
+            options
+                .timing(Local::now())
+                .unwrap()
+                .pace
+                .exhaustion_reduction(),
+            0
+        );
         options.exhausted_typing = true;
         let pace = options.timing(Local::now()).unwrap().pace;
         assert_eq!(pace.exhaustion_reduction(), 20);
-        let mut phase = Fatigue { tired: false, remaining: Duration::from_secs(4) };
+        let mut phase = Fatigue {
+            tired: false,
+            remaining: Duration::from_secs(4),
+        };
         assert!(!phase.advance(Duration::from_secs(3)));
         assert_eq!(65.0 * pace.efficiency(phase.tired), 65.0);
         assert!(phase.advance(Duration::from_secs(1)));
@@ -2506,7 +2539,14 @@ mod tests {
         assert!(phase.advance(Duration::from_secs(12)));
         assert_eq!(65.0 * pace.efficiency(phase.tired), 65.0);
         options.mode = TimingMode::Duration;
-        assert_eq!(options.timing(Local::now()).unwrap().pace.exhaustion_reduction(), 0);
+        assert_eq!(
+            options
+                .timing(Local::now())
+                .unwrap()
+                .pace
+                .exhaustion_reduction(),
+            0
+        );
     }
 
     #[test]
@@ -2521,10 +2561,31 @@ mod tests {
             natural_writing: true,
             thinking: Some([Duration::from_secs(8); 2]),
         };
-        let plan = |tired| Schedule::plan(&text, &natural, timing, start, start, SystemTime::UNIX_EPOCH, None, tired).unwrap();
-        assert_eq!(plan(false).deadlines, [100, 4200, 6300].map(Duration::from_millis));
-        assert_eq!(plan(true).deadlines, [125, 5250, 7375].map(Duration::from_millis));
-        assert_eq!(thinking_length(timing.thinking.unwrap(), timing.pace.efficiency(true)), Duration::from_secs(10));
+        let plan = |tired| {
+            Schedule::plan(
+                &text,
+                &natural,
+                timing,
+                start,
+                start,
+                SystemTime::UNIX_EPOCH,
+                None,
+                tired,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            plan(false).deadlines,
+            [100, 4200, 6300].map(Duration::from_millis)
+        );
+        assert_eq!(
+            plan(true).deadlines,
+            [125, 5250, 7375].map(Duration::from_millis)
+        );
+        assert_eq!(
+            thinking_length(timing.thinking.unwrap(), timing.pace.efficiency(true)),
+            Duration::from_secs(10)
+        );
     }
 
     #[test]
