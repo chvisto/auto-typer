@@ -302,16 +302,30 @@ fn natural_cadence(text: &[char], mut sample: impl FnMut() -> f64) -> Vec<Natura
                 let periods = separator.iter().filter(|&&ch| ch == '.').count();
                 let abbreviation = (previous_word.len() == 1
                     && previous_word.as_bytes()[0].is_ascii_alphabetic())
-                    || matches!(previous_word.as_str(), "mr" | "mrs" | "ms" | "dr" | "prof" | "sr" | "jr" | "vs" | "fig");
-                let sentence = periods > 1 || (periods == 1 && !abbreviation)
-                    || separator.iter().any(|&ch| matches!(ch, '!' | '?' | '。' | '！' | '？'));
-                let clause = separator.iter().any(|&ch| matches!(ch, ',' | ';' | ':' | '—' | '–'));
+                    || matches!(
+                        previous_word.as_str(),
+                        "mr" | "mrs" | "ms" | "dr" | "prof" | "sr" | "jr" | "vs" | "fig"
+                    );
+                let sentence = periods > 1
+                    || (periods == 1 && !abbreviation)
+                    || separator
+                        .iter()
+                        .any(|&ch| matches!(ch, '!' | '?' | '。' | '！' | '？'));
+                let clause = separator
+                    .iter()
+                    .any(|&ch| matches!(ch, ',' | ';' | ':' | '—' | '–'));
                 let chance = sample();
                 let draw = sample();
                 let tail = draw.powi(2);
-                let transition = matches!(key.as_str(), "but" | "because" | "although" | "however" | "therefore" | "meanwhile");
+                let transition = matches!(
+                    key.as_str(),
+                    "but" | "because" | "although" | "however" | "therefore" | "meanwhile"
+                );
                 let pressure = (words_in_burst.saturating_sub(3) as f64 * 0.045).min(0.34);
-                let hesitation = 0.03 + pressure + 0.06 * rare + 0.36 * complexity
+                let hesitation = 0.03
+                    + pressure
+                    + 0.06 * rare
+                    + 0.36 * complexity
                     + if transition { 0.12 } else { 0.0 };
                 let seconds = match newlines {
                     2.. => 0.55 + 1.45 * tail,
@@ -326,10 +340,12 @@ fn natural_cadence(text: &[char], mut sample: impl FnMut() -> f64) -> Vec<Natura
                         }
                     }
                     _ => 0.0,
-                }.min(2.0);
+                }
+                .min(2.0);
                 let step = &mut steps[span.start - 1];
                 step.duration = Duration::from_secs_f64(seconds);
-                step.covered_by = u8::from(periods > 0) | (u8::from(separator.contains(&',')) << 1)
+                step.covered_by = u8::from(periods > 0)
+                    | (u8::from(separator.contains(&',')) << 1)
                     | (u8::from(newlines > 0) << 2);
                 if seconds > 0.0 {
                     words_in_burst = 0;
@@ -345,7 +361,8 @@ fn natural_cadence(text: &[char], mut sample: impl FnMut() -> f64) -> Vec<Natura
                 0.0
             };
             step.weight_offset = burst_weight + pickup - 0.08 * familiarity
-                + complexity * (0.45 + 0.55 * rare) + ease_in;
+                + complexity * (0.45 + 0.55 * rare)
+                + ease_in;
         }
         words_in_burst += 1;
         previous = Some((span.end, key));
@@ -2042,14 +2059,25 @@ mod tests {
         assert!(deadlines.windows(2).all(|pair| pair[0] < pair[1]));
         let mut without_automatic_comma = natural;
         without_automatic_comma[after_comma].duration = Duration::ZERO;
-        let without = Schedule::plan(&text, &without_automatic_comma, timing, start, start, SystemTime::UNIX_EPOCH, None).unwrap();
+        let without = Schedule::plan(
+            &text,
+            &without_automatic_comma,
+            timing,
+            start,
+            start,
+            SystemTime::UNIX_EPOCH,
+            None,
+        )
+        .unwrap();
         assert_eq!(deadlines, without.deadlines);
         assert!(deadlines[after_comma] - deadlines[after_comma - 1] >= Duration::from_secs(1));
     }
 
     #[test]
     fn familiar_phrases_flow_and_long_words_ease_in() {
-        let text: Vec<_> = "The same thing the same thing the same thing the synchronization".chars().collect();
+        let text: Vec<_> = "The same thing the same thing the same thing the synchronization"
+            .chars()
+            .collect();
         let spans: Vec<_> = word_spans(&text).collect();
         let cadence = natural_cadence(&text, || 0.0);
         let before = |index: usize| cadence[spans[index].start - 1].duration;
