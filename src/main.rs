@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod rich_text;
 use std::{
     env, fs, io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
@@ -13,11 +14,16 @@ use std::{
 use chrono::{DateTime, Local, LocalResult, NaiveTime, TimeZone};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use enigo::{Direction::Click, Enigo, Key, Keyboard, Settings};
+use rich_text::{Document, Style};
 use windows_sys::Win32::{
     Foundation::{HWND, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::Threading::{CreateEventW, SetEvent},
     UI::{
-        Input::KeyboardAndMouse::{MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VK_ESCAPE},
+        Input::KeyboardAndMouse::{
+            GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+            MOD_NOREPEAT, RegisterHotKey, SendInput, UnregisterHotKey, VK_B, VK_CONTROL,
+            VK_ESCAPE, VK_I, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+        },
         WindowsAndMessaging::{
             GetForegroundWindow, GetWindowThreadProcessId, IsWindow, MSG, MWMO_INPUTAVAILABLE,
             MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_HOTKEY, WM_HOTKEY,
@@ -32,6 +38,7 @@ const BORDER: Color32 = Color32::from_gray(47);
 const SURFACE: Color32 = Color32::from_gray(13);
 const SEMIBOLD: &str = "Segoe Semibold";
 const HOTKEY_ID: i32 = 1;
+const TEXT_EDITOR: &str = "autotyper document";
 
 fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/autotyper.png"))
@@ -435,7 +442,8 @@ impl Drop for ActiveRun {
 
 #[derive(Default)]
 struct AutoTyper {
-    text: String,
+    text: Document,
+    plain_text: bool,
     options: Options,
     always_on_top: bool,
     status: Status,
@@ -485,6 +493,8 @@ impl AutoTyper {
         {
             return Err("The text contains an unsupported control character.".into());
         }
+        let styles = (!self.plain_text && self.text.has_styles())
+            .then(|| self.text.styles().to_vec());
         let timing = self.options.timing(Local::now())?;
         let countdown = Duration::from_secs(u64::from(self.options.countdown));
         let events =
@@ -503,6 +513,7 @@ impl AutoTyper {
                 };
                 let result = run_job(
                     &text,
+                    styles.as_deref(),
                     timing,
                     countdown,
                     &worker_events,
@@ -543,6 +554,20 @@ impl AutoTyper {
 }
 
 impl eframe::App for AutoTyper {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        self.text.clear_pending_paste();
+        if self.active.is_none() && self.capture.is_none() && !self.reading
+            && ctx.memory(|memory| memory.has_focus(egui::Id::new(TEXT_EDITOR)))
+            && let Some(plain) = input.events.iter().find_map(|event| {
+                if let egui::Event::Paste(text) = event { Some(text.as_str()) } else { None }
+            })
+            && let Ok(mut clipboard) = arboard::Clipboard::new()
+            && let Ok(html) = clipboard.get().html()
+        {
+            self.text.prepare_paste(plain, &html);
+        }
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some((requested_at, receiver)) = &self.capture {
             let image = match receiver.try_recv() {
@@ -763,23 +788,34 @@ impl AutoTyper {
                         .max_height(text_height)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let response = ui
-                                .add(
-                                    egui::TextEdit::multiline(&mut self.text)
-                                        .desired_rows(3)
-                                        .desired_width(f32::INFINITY)
-                                        .hint_text("Paste or type the text to send")
-                                        .frame(egui::Frame::new()),
-                                )
-                                .labelled_by(editor_label);
-                            if response.changed() && self.text.contains('\r') {
-                                self.text = self.text.replace("\r\n", "\n").replace('\r', "\n");
-                            }
-                            response
+                            let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, width: f32| {
+                                assert_eq!(buffer.type_id(), std::any::TypeId::of::<Document>());
+                                // SAFETY: this editor only passes its Document to the layouter.
+                                let document = unsafe { &*(buffer as *const dyn egui::TextBuffer as *const Document) };
+                                let mut job = document.layout(14.0, usize::MAX, true);
+                                job.wrap.max_width = width;
+                                ui.fonts_mut(|fonts| fonts.layout_job(job))
+                            };
+                            ui.add(egui::TextEdit::multiline(&mut self.text)
+                                .id(egui::Id::new(TEXT_EDITOR))
+                                .desired_rows(3)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("Paste or type the text to send")
+                                .frame(egui::Frame::new())
+                                .layouter(&mut layouter))
+                                .labelled_by(editor_label)
                         })
                         .inner;
                     ui.separator();
-                    compact_row(ui, 20.0, |ui| {
+                    compact_row(ui, 24.0, |ui| {
+                        if self.text.has_styles() {
+                            let mut preserve = !self.plain_text;
+                            if ui.checkbox(&mut preserve, "Send bold & italic")
+                                .on_hover_text("Uses Ctrl+B and Ctrl+I. Start with a plain caret in a rich-text editor.").changed()
+                            {
+                                self.plain_text = !preserve;
+                            }
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
                                 RichText::new(format!(
@@ -926,26 +962,7 @@ impl AutoTyper {
         egui::ScrollArea::vertical()
             .id_salt("paragraph")
             .show(ui, |ui| {
-                let split = self
-                    .text
-                    .char_indices()
-                    .nth(self.sent)
-                    .map_or(self.text.len(), |(byte, _)| byte);
-                let mut paragraph = egui::text::LayoutJob::default();
-                for (part, color) in [(&self.text[..split], WHITE), (&self.text[split..], MUTED)] {
-                    if !part.is_empty() {
-                        paragraph.append(
-                            part,
-                            0.0,
-                            egui::TextFormat {
-                                font_id: egui::FontId::proportional(19.0),
-                                color,
-                                line_height: Some(29.0),
-                                ..Default::default()
-                            },
-                        );
-                    }
-                }
+                let paragraph = self.text.layout(19.0, self.sent, !self.plain_text);
                 ui.add(egui::Label::new(paragraph).wrap());
             });
     }
@@ -1177,6 +1194,7 @@ impl Drop for EscapeHotkey {
 
 fn run_job(
     text: &[char],
+    styles: Option<&[Style]>,
     mut timing: Timing,
     countdown: Duration,
     events: &Events,
@@ -1225,6 +1243,7 @@ fn run_job(
     let mut next = 0;
     let mut previous = None;
     let mut focus_paused = false;
+    let mut active_style = Style::default();
     report(Update::Status(Status::Typing));
     while sent < text.len() {
         let due = schedule.next(next);
@@ -1288,6 +1307,13 @@ fn run_job(
             continue;
         }
 
+        if let Some(styles) = styles {
+            change_style(target, active_style, styles[sent])?;
+            active_style = styles[sent];
+            if foreground_window() != target {
+                continue;
+            }
+        }
         let ch = text[sent];
         let mut utf8 = [0; 4];
         let result = match ch {
@@ -1301,7 +1327,52 @@ fn run_job(
         next += 1;
         report(Update::Progress(sent));
     }
+    if foreground_window() == target {
+        change_style(target, active_style, Style::default())?;
+    }
     Ok(true)
+}
+
+fn change_style(target: HWND, previous: Style, next: Style) -> Result<(), String> {
+    if previous == next {
+        return Ok(());
+    }
+    let key_input = |key, up| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: key,
+                dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                ..Default::default()
+            },
+        },
+    };
+    let mut inputs = Vec::with_capacity(6);
+    inputs.push(key_input(VK_CONTROL, false));
+    for (key, changed) in [(VK_B, previous.bold != next.bold), (VK_I, previous.italic != next.italic)] {
+        if changed {
+            inputs.push(key_input(key, false));
+            inputs.push(key_input(key, true));
+        }
+    }
+    inputs.push(key_input(VK_CONTROL, true));
+
+    // SAFETY: these are Win32 virtual key values and the input buffer lives through SendInput.
+    let some_key_held = [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN, VK_B, VK_I]
+        .into_iter()
+        .any(|key| unsafe { GetAsyncKeyState(i32::from(key)) } < 0);
+    if some_key_held || foreground_window() != target {
+        return Err("Formatting stopped because the target or keyboard state changed.".into());
+    }
+    let sent = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        if sent > 0 {
+            let releases = [key_input(VK_B, true), key_input(VK_I, true), key_input(VK_CONTROL, true)];
+            unsafe { SendInput(releases.len() as u32, releases.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+        }
+        return Err("Windows could not send the formatting shortcut.".into());
+    }
+    Ok(())
 }
 
 fn foreground_window() -> HWND {
@@ -1323,10 +1394,8 @@ mod tests {
                     for mode in [TimingMode::Wpm, TimingMode::Duration, TimingMode::FinishAt] {
                         let ctx = egui::Context::default();
                         set_typography(&ctx);
-                        let mut app = AutoTyper {
-                            text: text.clone(),
-                            ..AutoTyper::default()
-                        };
+                        let mut app = AutoTyper::default();
+                        egui::TextBuffer::insert_text(&mut app.text, &text, egui::text::CharIndex(0));
                         app.options.mode = mode;
                         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size.into());
                         let mut input = egui::RawInput {
