@@ -373,8 +373,8 @@ dependencies = [
 name = "auto-typer"
 version = "0.1.0"
 dependencies = [
- "arboard",
  "chrono",
+ "clipboard-win",
  "eframe",
  "enigo",
  "html5ever",

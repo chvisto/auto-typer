@@ -16,6 +16,43 @@ use html5ever::{
 pub struct Style {
     pub bold: bool,
     pub italic: bool,
+    pub heading: Heading,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Heading {
+    #[default]
+    Body,
+    Title,
+    Level(u8),
+}
+
+pub fn clipboard_html() -> Option<String> {
+    let format = clipboard_win::register_format("HTML Format")?;
+    let _clipboard = clipboard_win::Clipboard::new_attempts(5).ok()?;
+    let mut raw = Vec::new();
+    clipboard_win::raw::get_vec(format.get(), &mut raw).ok()?;
+    let html = std::str::from_utf8(raw.split(|byte| *byte == 0).next()?).ok()?;
+    Some(clipboard_context(html).to_owned())
+}
+
+fn clipboard_context(raw: &str) -> &str {
+    let offset = |field: &str| {
+        raw.lines()
+            .take_while(|line| !line.trim_start().starts_with('<'))
+            .find_map(|line| line.strip_prefix(field))?
+            .trim()
+            .parse::<usize>()
+            .ok()
+    };
+    if let Some(context) = offset("StartHTML:")
+        .zip(offset("EndHTML:"))
+        .and_then(|(start, end)| raw.get(start..end))
+    {
+        return context;
+    }
+    // shortcut: marker-based selection covers producers that omit context offsets.
+    raw.find('<').and_then(|start| raw.get(start..)).unwrap_or(raw)
 }
 
 #[derive(Default)]
@@ -80,19 +117,24 @@ impl Document {
 }
 
 fn append(job: &mut LayoutJob, text: &str, size: f32, (style, sent): (Style, bool)) {
-    let family = if style.bold {
+    let family = if style.bold || style.heading != Heading::Body {
         FontFamily::Name(super::SEMIBOLD.into())
     } else {
         FontFamily::Proportional
+    };
+    let font_size = match style.heading {
+        Heading::Body => size,
+        Heading::Title => size + 12.0,
+        Heading::Level(level) => size + 1.2 * f32::from(10u8.saturating_sub(level)),
     };
     job.append(
         text,
         0.0,
         TextFormat {
-            font_id: FontId::new(size, family),
+            font_id: FontId::new(font_size, family),
             italics: style.italic,
             color: if sent { Color32::WHITE } else { super::MUTED },
-            line_height: (size == 19.0).then_some(29.0),
+            line_height: (size == 19.0).then_some((font_size + 4.0).max(29.0)),
             ..Default::default()
         },
     );
@@ -168,6 +210,21 @@ fn is_ignored(ch: char) -> bool {
         )
 }
 
+fn heading_kind(value: &str) -> Option<Heading> {
+    let value = value.trim_matches([' ', '\'', '"']).to_ascii_lowercase();
+    let value = value.strip_prefix("mso").unwrap_or(&value);
+    if value == "title" || value == "document-title" {
+        return Some(Heading::Title);
+    }
+    let level = value
+        .strip_prefix("heading")
+        .or_else(|| value.strip_prefix('h'))?
+        .trim_start_matches([' ', '-', '_'])
+        .parse::<u8>()
+        .ok()?;
+    (1..=9).contains(&level).then_some(Heading::Level(level))
+}
+
 impl TokenSink for FragmentSink {
     type Handle = ();
 
@@ -204,15 +261,31 @@ impl TokenSink for FragmentSink {
             },
             TagToken(tag) if tag.kind == StartTag => {
                 let name = tag.name.as_ref();
-                style.bold |= matches!(
-                    name,
-                    "b" | "strong" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "th"
-                );
+                style.bold |= matches!(name, "b" | "strong" | "th");
                 style.italic |= matches!(name, "i" | "em" | "cite" | "dfn" | "var");
                 hidden |= matches!(name, "head" | "script" | "style" | "template")
                     || tag.attrs.iter().any(|a| &*a.name.local == "hidden");
-                if let Some(attribute) = tag.attrs.iter().find(|a| &*a.name.local == "style") {
-                    for declaration in attribute.value.split(';') {
+                let attr = |name: &str| {
+                    tag.attrs.iter().find(|a| &*a.name.local == name).map(|a| &*a.value)
+                };
+                let semantic = (name != "title").then(|| heading_kind(name)).flatten();
+                let role = if attr("role") == Some("heading") {
+                    attr("aria-level")
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .filter(|level| (1..=9).contains(level))
+                        .map(Heading::Level)
+                } else {
+                    None
+                };
+                if let Some(heading) = semantic
+                    .or(role)
+                    .or_else(|| attr("class")?.split_ascii_whitespace().find_map(heading_kind))
+                    .or_else(|| heading_kind(attr("data-style")?))
+                {
+                    style.heading = heading;
+                }
+                if let Some(inline) = attr("style") {
+                    for declaration in inline.split(';') {
                         let Some((key, value)) = declaration.split_once(':') else {
                             continue;
                         };
@@ -241,6 +314,11 @@ impl TokenSink for FragmentSink {
                                     style.italic = false;
                                 } else if value == "italic" || value.starts_with("oblique") {
                                     style.italic = true;
+                                }
+                            }
+                            "mso-style-name" => {
+                                if let Some(heading) = heading_kind(&value) {
+                                    style.heading = heading;
                                 }
                             }
                             _ => {}
@@ -311,7 +389,7 @@ fn formats(plain: &str, html: &str) -> Option<Vec<Style>> {
                 matched += 1;
             }
         }
-        styles.push(last);
+        styles.push(if ch == '\n' { Style::default() } else { last });
     }
     (matched > 0 && matched * 5 >= total * 4 && matched * 5 >= rich.len() * 4).then_some(styles)
 }
@@ -334,21 +412,22 @@ mod tests {
             doc.styles()[11],
             Style {
                 bold: true,
-                italic: false
+                ..Default::default()
             }
         );
         assert_eq!(
             doc.styles()[18],
             Style {
                 bold: true,
-                italic: true
+                italic: true,
+                ..Default::default()
             }
         );
         assert_eq!(
             doc.styles()[23],
             Style {
-                bold: false,
-                italic: true
+                italic: true,
+                ..Default::default()
             }
         );
         doc.delete_char_range(CharIndex(6)..CharIndex(11));
@@ -389,5 +468,31 @@ mod tests {
         assert!(list_styles[2].bold);
         assert!(!list_styles[7].bold);
         assert!(list_styles[14].italic);
+    }
+
+    #[test]
+    fn clipboard_context_preserves_ancestor_formatting_and_named_headings() {
+        let body = concat!(
+            "<html><head><title>Metadata</title></head><body>",
+            "<strong><em><!--StartFragment-->Both<!--EndFragment--></em></strong>",
+            "</body></html>"
+        );
+        let start = "StartHTML:000000\r\nEndHTML:000000\r\n".len();
+        let raw = format!("StartHTML:{start:06}\r\nEndHTML:{:06}\r\n{body}", start + body.len());
+        let styles = formats("Both", clipboard_context(&raw)).unwrap();
+        assert!(styles.iter().all(|style| style.bold && style.italic));
+
+        let plain = "Title\nFirst\nSixth\nNinth\nBody";
+        let html = concat!(
+            "<p class='MsoTitle'>Title</p><h1>First</h1>",
+            "<div role='heading' aria-level='6'>Sixth</div>",
+            "<p style='mso-style-name:Heading 9'>Ninth</p><p>Body</p>"
+        );
+        let styles = formats(plain, html).unwrap();
+        assert_eq!(styles[0].heading, Heading::Title);
+        assert_eq!(styles[6].heading, Heading::Level(1));
+        assert_eq!(styles[12].heading, Heading::Level(6));
+        assert_eq!(styles[18].heading, Heading::Level(9));
+        assert_eq!(styles[24].heading, Heading::Body);
     }
 }

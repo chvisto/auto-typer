@@ -14,7 +14,7 @@ use std::{
 use chrono::{DateTime, Local, LocalResult, NaiveTime, TimeZone};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use enigo::{Direction::Click, Enigo, Key, Keyboard, Settings};
-use rich_text::{Document, Style};
+use rich_text::{Document, Heading, Style};
 use windows_sys::Win32::{
     Foundation::{HWND, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::Threading::{CreateEventW, SetEvent},
@@ -22,10 +22,11 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
             MOD_NOREPEAT, RegisterHotKey, SendInput, UnregisterHotKey, VK_B, VK_CONTROL, VK_ESCAPE,
-            VK_I, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+            VK_I, VK_LWIN, VK_MENU, VK_N, VK_OEM_2, VK_RWIN, VK_S, VK_SHIFT,
         },
         WindowsAndMessaging::{
-            GetForegroundWindow, GetWindowThreadProcessId, IsWindow, MSG, MWMO_INPUTAVAILABLE,
+            GUITHREADINFO, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
+            GetWindowThreadProcessId, IsWindow, MSG, MWMO_INPUTAVAILABLE,
             MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_HOTKEY, WM_HOTKEY,
         },
     },
@@ -567,8 +568,7 @@ impl eframe::App for AutoTyper {
                     None
                 }
             })
-            && let Ok(mut clipboard) = arboard::Clipboard::new()
-            && let Ok(html) = clipboard.get().html()
+            && let Some(html) = rich_text::clipboard_html()
         {
             self.text.prepare_paste(plain, &html);
         }
@@ -817,7 +817,7 @@ impl AutoTyper {
                         if self.text.has_styles() {
                             let mut preserve = !self.plain_text;
                             if ui.checkbox(&mut preserve, "Send bold & italic")
-                                .on_hover_text("Uses Ctrl+B and Ctrl+I. Start with a plain caret in a rich-text editor.").changed()
+                                .on_hover_text("Preserves bold and italic. Titles and headings use supported document styles. Start with a plain caret.").changed()
                             {
                                 self.plain_text = !preserve;
                             }
@@ -1250,6 +1250,9 @@ fn run_job(
     let mut previous = None;
     let mut focus_paused = false;
     let mut active_style = Style::default();
+    let mut paragraph = Heading::Body;
+    let headings = styles.filter(|styles| styles.iter().any(|style| style.heading != Heading::Body));
+    let editor = headings.map(|_| HeadingEditor::detect(target));
     report(Update::Status(Status::Typing));
     while sent < text.len() {
         let due = schedule.next(next);
@@ -1313,14 +1316,27 @@ fn run_job(
             continue;
         }
 
+        let ch = text[sent];
         if let Some(styles) = styles {
-            change_style(target, active_style, styles[sent])?;
-            active_style = styles[sent];
+            let mut style = styles[sent];
+            if let Some(editor) = editor {
+                if ch != '\n' && (sent == 0 || text[sent - 1] == '\n') && style.heading != paragraph
+                {
+                    if !editor.apply(target, style.heading, &mut enigo, events)? {
+                        return Ok(false);
+                    }
+                    paragraph = style.heading;
+                }
+                if editor == HeadingEditor::Other && style.heading != Heading::Body {
+                    style.bold = true;
+                }
+            }
+            change_style(target, active_style, style)?;
+            active_style = style;
             if foreground_window() != target {
                 continue;
             }
         }
-        let ch = text[sent];
         let mut utf8 = [0; 4];
         let result = match ch {
             '\n' => enigo.key(Key::Return, Click),
@@ -1340,9 +1356,154 @@ fn run_job(
 }
 
 fn change_style(target: HWND, previous: Style, next: Style) -> Result<(), String> {
-    if previous == next {
+    if previous.bold == next.bold && previous.italic == next.italic {
         return Ok(());
     }
+    send_shortcut(
+        target,
+        &[VK_CONTROL],
+        &[
+            (VK_B, previous.bold != next.bold),
+            (VK_I, previous.italic != next.italic),
+        ],
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeadingEditor {
+    Word,
+    Docs,
+    Other,
+}
+
+impl HeadingEditor {
+    fn detect(target: HWND) -> Self {
+        if window_class(target) == "OpusApp" {
+            return Self::Word;
+        }
+        let mut title = [0u16; 512];
+        // SAFETY: title is a writable UTF-16 buffer and target came from the foreground window.
+        let len = unsafe { GetWindowTextW(target, title.as_mut_ptr(), title.len() as i32) };
+        if String::from_utf16_lossy(&title[..len as usize]).contains(" - Google Docs") {
+            return Self::Docs;
+        }
+        Self::Other
+    }
+
+    fn apply(
+        self,
+        target: HWND,
+        heading: Heading,
+        enigo: &mut Enigo,
+        events: &Events,
+    ) -> Result<bool, String> {
+        match (self, heading) {
+            (Self::Other, _) => {}
+            (Self::Word, Heading::Body) => {
+                send_shortcut(target, &[VK_CONTROL, VK_SHIFT], &[(VK_N, true)])?;
+            }
+            (Self::Word, Heading::Level(level @ 1..=3))
+            | (Self::Docs, Heading::Level(level @ 1..=6)) => {
+                send_shortcut(
+                    target,
+                    &[VK_CONTROL, VK_MENU],
+                    &[(u16::from(b'0' + level), true)],
+                )?;
+            }
+            (Self::Docs, Heading::Body) => {
+                send_shortcut(target, &[VK_CONTROL, VK_MENU], &[(u16::from(b'0'), true)])?;
+            }
+            (Self::Docs, Heading::Level(_)) => {
+                return Err("Google Docs supports heading levels 1 through 6.".into());
+            }
+            (Self::Docs, Heading::Title) => {
+                send_shortcut(target, &[VK_MENU], &[(VK_OEM_2, true)])?;
+                if !wait_for_style_input(target, events)? {
+                    return Ok(false);
+                }
+                type_style_command(enigo, "Apply title")?;
+                if !wait_for_style_input(target, events)? {
+                    return Ok(false);
+                }
+                enigo.key(Key::DownArrow, Click).map_err(style_input_error)?;
+                enigo.key(Key::Return, Click).map_err(style_input_error)?;
+            }
+            (Self::Word, heading) => {
+                let initial_caret = focused_control(target);
+                send_shortcut(target, &[VK_CONTROL, VK_SHIFT], &[(VK_S, true)])?;
+                if !wait_for_style_input(target, events)? {
+                    return Ok(false);
+                }
+                let style_box = focused_control(target);
+                if style_box.is_null() || style_box == initial_caret {
+                    return Err("Word did not open its Apply Styles field.".into());
+                }
+                let name = match heading {
+                    Heading::Title => "Title".into(),
+                    Heading::Level(level) => format!("Heading {level}"),
+                    Heading::Body => unreachable!(),
+                };
+                type_style_command(enigo, &name)?;
+                enigo.key(Key::Return, Click).map_err(style_input_error)?;
+            }
+        }
+        if matches!(self, Self::Other) {
+            return Ok(true);
+        }
+        wait_for_style_input(target, events)
+    }
+}
+
+fn window_class(window: HWND) -> String {
+    let mut name = [0u16; 64];
+    // SAFETY: name is a writable UTF-16 buffer and the handle is opaque.
+    let len = unsafe { GetClassNameW(window, name.as_mut_ptr(), name.len() as i32) };
+    String::from_utf16_lossy(&name[..len as usize])
+}
+
+fn focused_control(window: HWND) -> HWND {
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: GetGUIThreadInfo writes to the initialized structure for the target thread.
+    let thread = unsafe { GetWindowThreadProcessId(window, ptr::null_mut()) };
+    if thread != 0 && unsafe { GetGUIThreadInfo(thread, &mut info) } != 0 {
+        info.hwndFocus
+    } else {
+        ptr::null_mut()
+    }
+}
+
+fn wait_for_style_input(target: HWND, events: &Events) -> Result<bool, String> {
+    let deadline = Instant::now() + Duration::from_millis(180);
+    let mut timing_changed = false;
+    loop {
+        match events.wait(deadline)? {
+            Wait::Stop => return Ok(false),
+            Wait::Timing => timing_changed = true,
+            Wait::Due => break,
+        }
+    }
+    if timing_changed {
+        signal(&events.timing).map_err(|error| format!("Could not apply timing. {error}"))?;
+    }
+    if foreground_window() == target {
+        Ok(true)
+    } else {
+        Err("The target changed while applying a paragraph style.".into())
+    }
+}
+
+fn type_style_command(enigo: &mut Enigo, text: &str) -> Result<(), String> {
+    enigo.text(text).map_err(style_input_error)
+}
+
+fn style_input_error(error: enigo::InputError) -> String {
+    format!("Could not apply the paragraph style. {error}")
+}
+
+fn send_shortcut(target: HWND, modifiers: &[u16], keys: &[(u16, bool)]) -> Result<(), String> {
     let key_input = |key, up| INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
@@ -1353,22 +1514,20 @@ fn change_style(target: HWND, previous: Style, next: Style) -> Result<(), String
             },
         },
     };
-    let mut inputs = Vec::with_capacity(6);
-    inputs.push(key_input(VK_CONTROL, false));
-    for (key, changed) in [
-        (VK_B, previous.bold != next.bold),
-        (VK_I, previous.italic != next.italic),
-    ] {
+    let mut inputs = Vec::with_capacity(2 * (modifiers.len() + keys.len()));
+    inputs.extend(modifiers.iter().map(|&key| key_input(key, false)));
+    for &(key, changed) in keys {
         if changed {
             inputs.push(key_input(key, false));
             inputs.push(key_input(key, true));
         }
     }
-    inputs.push(key_input(VK_CONTROL, true));
+    inputs.extend(modifiers.iter().rev().map(|&key| key_input(key, true)));
 
     // SAFETY: these are Win32 virtual key values and the input buffer lives through SendInput.
-    let some_key_held = [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN, VK_B, VK_I]
+    let some_key_held = [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN]
         .into_iter()
+        .chain(keys.iter().filter(|(_, changed)| *changed).map(|(key, _)| *key))
         .any(|key| unsafe { GetAsyncKeyState(i32::from(key)) } < 0);
     if some_key_held || foreground_window() != target {
         return Err("Formatting stopped because the target or keyboard state changed.".into());
@@ -1382,11 +1541,13 @@ fn change_style(target: HWND, previous: Style, next: Style) -> Result<(), String
     };
     if sent != inputs.len() as u32 {
         if sent > 0 {
-            let releases = [
-                key_input(VK_B, true),
-                key_input(VK_I, true),
-                key_input(VK_CONTROL, true),
-            ];
+            let releases: Vec<_> = keys
+                .iter()
+                .filter(|(_, changed)| *changed)
+                .map(|(key, _)| *key)
+                .chain(modifiers.iter().rev().copied())
+                .map(|key| key_input(key, true))
+                .collect();
             unsafe {
                 SendInput(
                     releases.len() as u32,
