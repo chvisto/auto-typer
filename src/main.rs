@@ -338,8 +338,9 @@ fn natural_cadence(text: &[char], mut sample: impl FnMut() -> f64) -> Vec<Natura
                     previous_word.as_str(),
                     "a" | "an" | "the" | "to" | "of" | "and" | "or" | "in" | "for"
                 );
-                let pressure = (words_in_burst.saturating_sub(burst_target.saturating_sub(2))
-                    as f64 * 0.095).min(0.48);
+                let pressure =
+                    (words_in_burst.saturating_sub(burst_target.saturating_sub(2)) as f64 * 0.095)
+                        .min(0.48);
                 let hesitation = 0.03
                     + pressure
                     + 0.06 * rare
@@ -2118,7 +2119,16 @@ mod tests {
             pauses: [Duration::ZERO; 3],
             natural_writing: true,
         };
-        let schedule = Schedule::plan(&text, &cadence, timing, start, start, SystemTime::UNIX_EPOCH, None).unwrap();
+        let schedule = Schedule::plan(
+            &text,
+            &cadence,
+            timing,
+            start,
+            start,
+            SystemTime::UNIX_EPOCH,
+            None,
+        )
+        .unwrap();
         let interval = |index: usize| schedule.deadlines[index] - schedule.deadlines[index - 1];
         let middle = interval(spans[1].start + 1);
         assert!(schedule.deadlines[0] >= middle.mul_f64(1.35));
@@ -2139,7 +2149,10 @@ mod tests {
     fn a_long_unpunctuated_passage_gets_a_break_even_without_an_early_hesitation() {
         let text: Vec<_> = "notes ".repeat(18).chars().collect();
         let cadence = natural_cadence(&text, || 0.999);
-        let breaks: Vec<_> = cadence.iter().filter(|step| !step.duration.is_zero()).collect();
+        let breaks: Vec<_> = cadence
+            .iter()
+            .filter(|step| !step.duration.is_zero())
+            .collect();
         assert_eq!(breaks.len(), 1);
         assert!(breaks[0].duration >= Duration::from_millis(400));
     }
