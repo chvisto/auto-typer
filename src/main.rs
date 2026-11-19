@@ -141,6 +141,7 @@ struct Options {
     finish_at: String,
     countdown: u32,
     pauses: [Pause; 3],
+    natural_writing: bool,
 }
 
 impl Default for Options {
@@ -151,6 +152,7 @@ impl Default for Options {
             total_seconds: 60.0,
             finish_at: String::new(),
             countdown: 4,
+            natural_writing: false,
             pauses: [
                 Pause {
                     enabled: true,
@@ -186,7 +188,11 @@ impl Options {
                     .map_err(|_| "Enter a valid duration for each enabled pause.".to_owned())?;
             }
         }
-        Ok(Timing { pace, pauses })
+        Ok(Timing {
+            pace,
+            pauses,
+            natural_writing: self.natural_writing,
+        })
     }
 }
 
@@ -221,6 +227,7 @@ enum Pace {
 struct Timing {
     pace: Pace,
     pauses: [Duration; 3],
+    natural_writing: bool,
 }
 
 impl Timing {
@@ -234,6 +241,84 @@ impl Timing {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct NaturalStep {
+    duration: Duration,
+    covered_by: u8,
+    weight_offset: f64,
+}
+
+fn word_spans(text: &[char]) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    let mut next = 0;
+    std::iter::from_fn(move || {
+        while text.get(next).is_some_and(|ch| !ch.is_alphanumeric()) {
+            next += 1;
+        }
+        let start = next;
+        text.get(start)?;
+        next += 1;
+        while text.get(next).is_some_and(|&ch| {
+            ch.is_alphanumeric()
+                || (matches!(ch, '\'' | '’' | '-') && text.get(next + 1).is_some_and(|ch| ch.is_alphanumeric()))
+        }) {
+            next += 1;
+        }
+        Some(start..next)
+    })
+}
+
+fn natural_cadence(text: &[char], mut sample: impl FnMut() -> f64) -> Vec<NaturalStep> {
+    let word_key = |span: std::ops::Range<usize>| {
+        text[span].iter().flat_map(|ch| ch.to_lowercase()).collect::<String>()
+    };
+    let mut counts = std::collections::HashMap::<String, usize>::new();
+    for span in word_spans(text) {
+        *counts.entry(word_key(span)).or_default() += 1;
+    }
+    let peak = counts.values().copied().max().unwrap_or(1) as f64;
+    let mut steps = vec![NaturalStep::default(); text.len()];
+    let mut previous_end = None;
+    for span in word_spans(text) {
+        let count = counts[&word_key(span.clone())];
+        let familiarity = if count > 1 { (count as f64 / peak).sqrt() } else { 0.0 };
+        let complexity = (span.len().saturating_sub(7) as f64 * 0.045).min(0.48);
+        let draw = sample();
+        let rare = 1.0 - familiarity;
+        let mut preparation: f64 = 2.0 * familiarity * draw.powi(3);
+        for (letter, step) in steps[span.clone()].iter_mut().enumerate() {
+            step.weight_offset = if complexity > 0.0 {
+                let ease_in = if letter < 2 { 0.12 } else { 0.0 };
+                complexity + (0.12 + ease_in) * rare
+            } else {
+                -0.10 * familiarity
+            };
+        }
+        if complexity > 0.0 {
+            preparation = preparation.max(complexity * (0.35 + 0.55 * rare));
+        }
+        if let Some(end) = previous_end {
+            let separator: &[char] = &text[end..span.start];
+            if separator.iter().any(|ch| ch.is_whitespace()) {
+                let newlines = separator.iter().filter(|&&ch| ch == '\n').count();
+                let structure = match newlines {
+                    2.. => 0.70 + 1.30 * draw,
+                    1 => 0.4 + 0.85 * draw,
+                    _ if separator.iter().any(|&ch| matches!(ch, '.' | '!' | '?')) => 0.3 + 0.95 * draw,
+                    _ if separator.iter().any(|&ch| matches!(ch, ',' | ';' | ':' | '—' | '–')) => 0.10 + 0.45 * draw,
+                    _ => 0.0,
+                };
+                let step = &mut steps[span.start - 1];
+                step.duration = Duration::from_secs_f64(preparation.max(structure).min(2.0));
+                step.covered_by = u8::from(separator.contains(&'.'))
+                    | (u8::from(separator.contains(&',')) << 1)
+                    | (u8::from(newlines > 0) << 2);
+            }
+        }
+        previous_end = Some(span.end);
+    }
+    steps
+}
+
 struct Schedule {
     from: Instant,
     wall_from: SystemTime,
@@ -242,18 +327,38 @@ struct Schedule {
 
 impl Schedule {
     fn plan(
-        remaining: &[char],
+        text: &[char],
+        natural: &[NaturalStep],
         timing: Timing,
         started: Instant,
         now: Instant,
         wall_now: SystemTime,
-        previous: Option<(char, Instant)>,
+        previous: Option<(usize, Instant)>,
     ) -> Result<Self, String> {
-        let count = remaining.len();
-        let initial_pause = previous.map_or(Duration::ZERO, |(ch, sent_at)| {
-            timing
-                .pause_after(ch)
-                .saturating_sub(now.saturating_duration_since(sent_at))
+        let first = previous.map_or(0, |(index, _)| index + 1);
+        let count = text.len() - first;
+        let configured = timing.pauses.iter().enumerate().fold(0u8, |mask, (index, pause)| {
+            mask | (u8::from(!pause.is_zero()) << index)
+        });
+        let gaps = |index: usize| {
+            let fixed = timing.pause_after(text[index]);
+            let extra = natural
+                .get(index)
+                .filter(|pause| timing.natural_writing && pause.covered_by & configured == 0)
+                .map_or(Duration::ZERO, |pause| pause.duration);
+            (fixed, extra)
+        };
+        let weight = |index: usize| {
+            if timing.natural_writing {
+                1.0 + natural.get(index).map_or(0.0, |step| step.weight_offset)
+            } else {
+                1.0
+            }
+        };
+        let (mut fixed_elapsed, mut natural_elapsed) = previous.map_or((Duration::ZERO, Duration::ZERO), |(index, sent_at)| {
+            let (fixed, extra) = gaps(index);
+            let elapsed = now.saturating_duration_since(sent_at);
+            (fixed.saturating_sub(elapsed), extra.saturating_sub(elapsed.saturating_sub(fixed)))
         });
         let available = match timing.pace {
             Pace::Wpm(_) => None,
@@ -262,24 +367,24 @@ impl Schedule {
             }
             Pace::FinishAt(finish) => Some(finish.duration_since(wall_now).unwrap_or_default()),
         };
-        let typing_budget = if let Some(available) = available {
+        let timed_budget = if let Some(available) = available {
             if available.is_zero() {
                 return Err(
                     "Set a finish time that leaves time to type after the countdown.".into(),
                 );
             }
-            let pauses = initial_pause
-                + remaining[..count.saturating_sub(1)]
-                    .iter()
-                    .map(|&ch| timing.pause_after(ch))
-                    .sum::<Duration>();
-            if available <= pauses {
+            let (fixed_total, natural_total) = (first..text.len().saturating_sub(1))
+                .map(gaps)
+                .fold((fixed_elapsed, natural_elapsed), |(fixed, extra), (f, e)| (fixed + f, extra + e));
+            if available <= fixed_total {
                 return Err(format!(
                     "The remaining pauses take {:.1} s. Set a later finish or shorten the pauses.",
-                    pauses.as_secs_f64()
+                    fixed_total.as_secs_f64()
                 ));
             }
-            Some(available - pauses)
+            let after_fixed = available - fixed_total;
+            let natural_budget = natural_total.min(after_fixed.mul_f64(0.35));
+            Some((after_fixed - natural_budget, natural_total, natural_budget))
         } else {
             None
         };
@@ -289,18 +394,36 @@ impl Schedule {
         };
 
         let mut typing = Duration::ZERO;
-        let mut pauses = initial_pause;
+        let mut typed_weight = 0.0;
+        let total_weight = if timed_budget.is_some() {
+            (first..text.len()).map(weight).sum::<f64>()
+        } else {
+            0.0
+        };
         let mut deadlines = Vec::with_capacity(count);
-        for (index, &ch) in remaining.iter().enumerate() {
-            typing = match typing_budget {
-                Some(budget) => budget.mul_f64((index + 1) as f64 / count as f64),
+        for index in first..text.len() {
+            let scheduled_natural = match timed_budget {
+                Some((_, total, budget)) if !total.is_zero() => {
+                    budget.mul_f64(natural_elapsed.as_secs_f64() / total.as_secs_f64())
+                }
+                _ => natural_elapsed,
+            };
+            let weight = weight(index);
+            typed_weight += weight;
+            typing = match timed_budget {
+                Some((budget, _, _)) => budget.mul_f64(typed_weight / total_weight),
                 None => {
                     typing
-                        + Duration::from_secs_f64(seconds_per_char * rand::random_range(0.8..=1.2))
+                        + Duration::from_secs_f64(seconds_per_char * weight * rand::random_range(0.8..=1.2))
                 }
             };
-            deadlines.push(typing + pauses);
-            pauses += timing.pause_after(ch);
+            deadlines.push(typing + fixed_elapsed + scheduled_natural);
+            let (fixed, extra) = gaps(index);
+            fixed_elapsed += fixed;
+            natural_elapsed += extra;
+        }
+        if let Some((last, available)) = deadlines.last_mut().zip(available) {
+            *last = available;
         }
         Ok(Self {
             from: now,
@@ -1116,10 +1239,12 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
             .unwrap(),
         count => format!("{count} enabled"),
     };
-    let button = ui.add(
-        egui::Button::new(format!("Pauses    {summary}"))
-            .min_size(egui::vec2(ui.available_width(), 31.0)),
-    );
+    let label = if options.natural_writing {
+        format!("Pauses    {summary}  ·  Natural writing")
+    } else {
+        format!("Pauses    {summary}")
+    };
+    let button = ui.add(egui::Button::new(label).min_size(egui::vec2(ui.available_width(), 31.0)));
     egui::Popup::from_toggle_button_response(&button)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
@@ -1140,6 +1265,8 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
                     });
                 });
             }
+            ui.checkbox(&mut options.natural_writing, "Natural writing")
+                .on_hover_text("Uses word frequency, longer words and sentence breaks to vary the pace. Timed modes fit pauses into the remaining time.");
         });
 }
 
@@ -1234,9 +1361,13 @@ fn run_job(
     let _hotkey = EscapeHotkey::register()?;
     let mut enigo = Enigo::new(&Settings::default())
         .map_err(|error| format!("Could not initialize keyboard input. {error}"))?;
+    let mut natural = timing
+        .natural_writing
+        .then(|| natural_cadence(text, rand::random::<f64>));
     let started = Instant::now() + countdown;
     let mut schedule = Schedule::plan(
         text,
+        natural.as_deref().unwrap_or_default(),
         timing,
         started,
         started,
@@ -1261,6 +1392,7 @@ fn run_job(
     if matches!(timing.pace, Pace::FinishAt(_)) {
         schedule = Schedule::plan(
             text,
+            natural.as_deref().unwrap_or_default(),
             timing,
             started,
             Instant::now(),
@@ -1291,8 +1423,12 @@ fn run_job(
             Wait::Stop => return Ok(false),
             Wait::Timing => {
                 if let Some(requested) = changes.try_iter().last() {
+                    if requested.natural_writing {
+                        natural.get_or_insert_with(|| natural_cadence(text, rand::random::<f64>));
+                    }
                     match Schedule::plan(
-                        &text[sent..],
+                        text,
+                        natural.as_deref().unwrap_or_default(),
                         requested,
                         started,
                         Instant::now(),
@@ -1329,7 +1465,15 @@ fn run_job(
         if focus_paused
             || (matches!(timing.pace, Pace::FinishAt(_)) && schedule.clock_shifted(now, wall_now))
         {
-            schedule = Schedule::plan(&text[sent..], timing, started, now, wall_now, previous)?;
+            schedule = Schedule::plan(
+                text,
+                natural.as_deref().unwrap_or_default(),
+                timing,
+                started,
+                now,
+                wall_now,
+                previous,
+            )?;
             next = 0;
             if focus_paused {
                 focus_paused = false;
@@ -1371,7 +1515,7 @@ fn run_job(
             ch => enigo.text(ch.encode_utf8(&mut utf8)),
         };
         result.map_err(|error| format!("Keyboard input failed. {error}"))?;
-        previous = Some((ch, Instant::now()));
+        previous = Some((sent, Instant::now()));
         sent += 1;
         next += 1;
         report(Update::Progress(sent));
@@ -1700,6 +1844,7 @@ mod tests {
         let start = Instant::now();
         Schedule::plan(
             &text.chars().collect::<Vec<_>>(),
+            &[],
             timing,
             start,
             start,
@@ -1713,6 +1858,7 @@ mod tests {
         let timing = Timing {
             pace: Pace::Duration(Duration::from_secs(20)),
             pauses: [5, 1, 2].map(Duration::from_secs),
+            natural_writing: false,
         };
         let schedule = planned("é.,\nx.", timing).unwrap();
         let deadlines: Vec<_> = schedule
@@ -1728,6 +1874,7 @@ mod tests {
         let timing = Timing {
             pace: Pace::Duration(Duration::from_secs(5)),
             pauses: [5, 0, 0].map(Duration::from_secs),
+            natural_writing: false,
         };
         assert!(planned("One. Two.", timing).is_err());
     }
@@ -1739,14 +1886,16 @@ mod tests {
         let timing = Timing {
             pace: Pace::Duration(Duration::from_secs(10)),
             pauses: [3, 0, 0].map(Duration::from_secs),
+            natural_writing: false,
         };
         let schedule = Schedule::plan(
-            &['a', 'b'],
+            &['.', 'a', 'b'],
+            &[],
             timing,
             started,
             now,
             SystemTime::UNIX_EPOCH,
-            Some(('.', now - Duration::from_secs(1))),
+            Some((0, now - Duration::from_secs(1))),
         )
         .unwrap();
         assert_eq!(schedule.deadlines, [3, 4].map(Duration::from_secs));
@@ -1765,8 +1914,10 @@ mod tests {
         let timing = Timing {
             pace: Pace::FinishAt(finish.into()),
             pauses: [Duration::ZERO; 3],
+            natural_writing: false,
         };
-        let schedule = Schedule::plan(&['a'], timing, started, started, wall_now, None).unwrap();
+        let schedule =
+            Schedule::plan(&['a'], &[], timing, started, started, wall_now, None).unwrap();
         assert_eq!(schedule.deadlines, [Duration::from_secs(30)]);
         assert!(!schedule.clock_shifted(
             started + Duration::from_secs(1),
@@ -1789,6 +1940,54 @@ mod tests {
             assert!((0.799999..=1.200001).contains(&ratio));
             previous = next;
         }
+    }
+
+    #[test]
+    fn natural_writing_only_pauses_at_boundaries_and_fits_the_deadline() {
+        let text: Vec<_> = "First, and then continue.\n\nAnother thought! Last one."
+            .chars()
+            .collect();
+        let natural = natural_cadence(&text, || 0.99);
+        let after_comma = text.iter().position(|&ch| ch == ',').unwrap() + 1;
+        let after_newline = text.iter().rposition(|&ch| ch == '\n').unwrap();
+        assert_eq!(natural[0].duration, Duration::ZERO);
+        assert_eq!(natural[after_comma].covered_by, 0b010);
+        assert_eq!(natural[after_newline].covered_by, 0b101);
+        assert!(natural[after_newline].duration > natural[after_comma].duration);
+        assert!(natural.iter().all(|pause| pause.duration <= Duration::from_secs(2)));
+
+        let start = Instant::now();
+        let duration = Duration::from_secs(3);
+        let timing = Timing {
+            pace: Pace::Duration(duration),
+            pauses: [Duration::ZERO, Duration::from_secs(1), Duration::ZERO],
+            natural_writing: true,
+        };
+        let schedule = Schedule::plan(&text, &natural, timing, start, start, SystemTime::UNIX_EPOCH, None).unwrap();
+        let deadlines = schedule.deadlines;
+        assert_eq!(deadlines.last().copied(), Some(duration));
+        assert!(deadlines.windows(2).all(|pair| pair[0] < pair[1]));
+        let regular = deadlines[0];
+        let gap = |index: usize| (deadlines[index + 1] - deadlines[index]).as_nanos();
+        assert!(gap(after_comma).abs_diff(regular.as_nanos()) <= 1);
+        assert!(gap(after_comma - 1).abs_diff((Duration::from_secs(1) + regular).as_nanos()) <= 1);
+        assert!(deadlines[after_newline + 1] - deadlines[after_newline] > regular);
+    }
+
+    #[test]
+    fn repetition_and_long_words_change_the_cadence_differently() {
+        let text: Vec<_> = "sun Weather Sun bright sun watermelon".chars().collect();
+        let spans: Vec<_> = word_spans(&text).collect();
+        let mut draws = [0.1, 0.25, 0.55, 0.65, 0.95, 0.9].into_iter();
+        let cadence = natural_cadence(&text, || draws.next().unwrap());
+        let before = |index: usize| cadence[spans[index].start - 1].duration;
+        assert_eq!(before(1), Duration::ZERO);
+        assert!(before(2) > Duration::ZERO);
+        assert!(before(4) > before(2) && before(4) < Duration::from_secs(2));
+        let weight = |word: usize, letter: usize| cadence[spans[word].start + letter].weight_offset;
+        assert_eq!(weight(1, 0), 0.0);
+        assert!(weight(2, 0) < 0.0);
+        assert!(weight(5, 0) > weight(5, 2) && weight(5, 2) > 0.0);
     }
 
     #[test]
