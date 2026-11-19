@@ -570,7 +570,7 @@ impl eframe::App for AutoTyper {
         if open || !dropped.is_empty() {
             let selection = match dropped.as_slice() {
                 [] => docx::choose(foreground_window()),
-                [file] => Ok(file.path.clone()),
+                [file] => Ok(Some(file.path().to_owned())),
                 _ => Err("Drop one Word document at a time.".into()),
             };
             match selection.and_then(|path| path.as_deref().map(docx::read).transpose()) {
