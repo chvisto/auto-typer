@@ -1496,7 +1496,10 @@ fn focused_control(window: HWND) -> HWND {
     }
 }
 
-fn wait_for_style_input(events: &Events, focus_is_valid: impl FnOnce() -> bool) -> Result<bool, String> {
+fn wait_for_style_input(
+    events: &Events,
+    focus_is_valid: impl FnOnce() -> bool,
+) -> Result<bool, String> {
     let deadline = Instant::now() + Duration::from_millis(180);
     let mut timing_changed = false;
     loop {
