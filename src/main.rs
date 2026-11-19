@@ -282,58 +282,79 @@ fn natural_cadence(text: &[char], mut sample: impl FnMut() -> f64) -> Vec<Natura
     }
     let peak = counts.values().copied().max().unwrap_or(1) as f64;
     let mut steps = vec![NaturalStep::default(); text.len()];
-    let mut previous_end = None;
+    let mut previous: Option<(usize, String)> = None;
+    let mut words_in_burst = 0usize;
+    let mut burst_weight = 0.0;
     for span in word_spans(text) {
-        let count = counts[&word_key(span.clone())];
+        let key = word_key(span.clone());
+        let count = counts[&key];
         let familiarity = if count > 1 {
             (count as f64 / peak).sqrt()
         } else {
             0.0
         };
-        let complexity = (span.len().saturating_sub(7) as f64 * 0.045).min(0.48);
-        let draw = sample();
+        let complexity = (span.len().saturating_sub(7) as f64 * 0.032).min(0.28);
         let rare = 1.0 - familiarity;
-        let mut preparation: f64 = 2.0 * familiarity * draw.powi(3);
-        for (letter, step) in steps[span.clone()].iter_mut().enumerate() {
-            step.weight_offset = if complexity > 0.0 {
-                let ease_in = if letter < 2 { 0.12 } else { 0.0 };
-                complexity + (0.12 + ease_in) * rare
-            } else {
-                -0.10 * familiarity
-            };
-        }
-        if complexity > 0.0 {
-            preparation = preparation.max(complexity * (0.35 + 0.55 * rare));
-        }
-        if let Some(end) = previous_end {
-            let separator: &[char] = &text[end..span.start];
+        if let Some((end, previous_word)) = &previous {
+            let separator = &text[*end..span.start];
             if separator.iter().any(|ch| ch.is_whitespace()) {
                 let newlines = separator.iter().filter(|&&ch| ch == '\n').count();
-                let structure = match newlines {
-                    2.. => 0.70 + 1.30 * draw,
-                    1 => 0.4 + 0.85 * draw,
-                    _ if separator.iter().any(|&ch| matches!(ch, '.' | '!' | '?')) => {
-                        0.3 + 0.95 * draw
-                    }
-                    _ if separator
-                        .iter()
-                        .any(|&ch| matches!(ch, ',' | ';' | ':' | '—' | '–')) =>
-                    {
-                        0.10 + 0.45 * draw
+                let periods = separator.iter().filter(|&&ch| ch == '.').count();
+                let abbreviation = (previous_word.len() == 1
+                    && previous_word.as_bytes()[0].is_ascii_alphabetic())
+                    || matches!(previous_word.as_str(), "mr" | "mrs" | "ms" | "dr" | "prof" | "sr" | "jr" | "vs" | "fig");
+                let sentence = periods > 1 || (periods == 1 && !abbreviation)
+                    || separator.iter().any(|&ch| matches!(ch, '!' | '?' | '。' | '！' | '？'));
+                let clause = separator.iter().any(|&ch| matches!(ch, ',' | ';' | ':' | '—' | '–'));
+                let chance = sample();
+                let draw = sample();
+                let tail = draw.powi(2);
+                let transition = matches!(key.as_str(), "but" | "because" | "although" | "however" | "therefore" | "meanwhile");
+                let pressure = (words_in_burst.saturating_sub(3) as f64 * 0.045).min(0.34);
+                let hesitation = 0.03 + pressure + 0.06 * rare + 0.36 * complexity
+                    + if transition { 0.12 } else { 0.0 };
+                let seconds = match newlines {
+                    2.. => 0.55 + 1.45 * tail,
+                    1 => 0.32 + 0.98 * tail,
+                    _ if sentence => 0.22 + 1.14 * tail,
+                    _ if clause && words_in_burst >= 2 && chance < 0.72 => 0.10 + 0.62 * tail,
+                    _ if periods == 0 && words_in_burst >= 3 && chance < hesitation => {
+                        if draw > 0.94 {
+                            0.55 + 1.45 * ((draw - 0.94) / 0.06).powi(2)
+                        } else {
+                            0.055 + 0.34 * tail + 0.5 * complexity
+                        }
                     }
                     _ => 0.0,
-                };
+                }.min(2.0);
                 let step = &mut steps[span.start - 1];
-                step.duration = Duration::from_secs_f64(preparation.max(structure).min(2.0));
-                step.covered_by = u8::from(separator.contains(&'.'))
-                    | (u8::from(separator.contains(&',')) << 1)
+                step.duration = Duration::from_secs_f64(seconds);
+                step.covered_by = u8::from(periods > 0) | (u8::from(separator.contains(&',')) << 1)
                     | (u8::from(newlines > 0) << 2);
+                if seconds > 0.0 {
+                    words_in_burst = 0;
+                    burst_weight = (sample() - 0.5) * 0.18;
+                }
             }
         }
-        previous_end = Some(span.end);
+        let pickup = 0.14 * (1.0 - (words_in_burst as f64 / 3.0).min(1.0)).powi(2);
+        for (letter, step) in steps[span.clone()].iter_mut().enumerate() {
+            let ease_in = if complexity > 0.0 {
+                0.06 * 3usize.saturating_sub(letter) as f64 * (0.35 + 0.65 * rare)
+            } else {
+                0.0
+            };
+            step.weight_offset = burst_weight + pickup - 0.08 * familiarity
+                + complexity * (0.45 + 0.55 * rare) + ease_in;
+        }
+        words_in_burst += 1;
+        previous = Some((span.end, key));
     }
+    // Slow changes in rhythm should carry across neighboring keystrokes.
+    let mut drift = 0.0;
     for step in &mut steps {
-        step.jitter_offset = ((sample() - 0.5) * 0.4) as f32;
+        drift = drift * 0.82 + (sample() - 0.5) * 0.10;
+        step.jitter_offset = (drift + (sample() - 0.5) * 0.08) as f32;
     }
     steps
 }
@@ -1304,7 +1325,7 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
                 });
             }
             ui.checkbox(&mut options.natural_writing, "Natural writing")
-                .on_hover_text("Uses word frequency, longer words and sentence breaks to vary the pace. WPM excludes pauses. Timed modes fit pauses into the remaining time.");
+                .on_hover_text("Types in bursts, pauses at thought breaks, and eases into longer words. WPM excludes pauses. Timed modes fit pauses into the remaining time.");
         });
 }
 
@@ -1982,15 +2003,16 @@ mod tests {
 
     #[test]
     fn natural_writing_only_pauses_at_boundaries_and_fits_the_deadline() {
-        let text: Vec<_> = "First, and then continue.\n\nAnother thought! Last one."
+        let text: Vec<_> = "First we write, and then continue.\n\nAnother thought! Last one."
             .chars()
             .collect();
-        let natural = natural_cadence(&text, || 0.99);
+        let natural = natural_cadence(&text, || 0.2);
         let after_comma = text.iter().position(|&ch| ch == ',').unwrap() + 1;
         let after_newline = text.iter().rposition(|&ch| ch == '\n').unwrap();
         assert_eq!(natural[0].duration, Duration::ZERO);
         assert_eq!(natural[after_comma].covered_by, 0b010);
         assert_eq!(natural[after_newline].covered_by, 0b101);
+        assert!(natural[after_comma].duration > Duration::ZERO);
         assert!(natural[after_newline].duration > natural[after_comma].duration);
         assert!(
             natural
@@ -2018,32 +2040,41 @@ mod tests {
         let deadlines = schedule.deadlines;
         assert_eq!(deadlines.last().copied(), Some(duration));
         assert!(deadlines.windows(2).all(|pair| pair[0] < pair[1]));
-        let regular = deadlines[0];
-        let gap = |index: usize| (deadlines[index + 1] - deadlines[index]).as_nanos();
-        assert!(gap(after_comma).abs_diff(regular.as_nanos()) <= 1);
-        assert!(gap(after_comma - 1).abs_diff((Duration::from_secs(1) + regular).as_nanos()) <= 1);
-        assert!(deadlines[after_newline + 1] - deadlines[after_newline] > regular);
+        let mut without_automatic_comma = natural;
+        without_automatic_comma[after_comma].duration = Duration::ZERO;
+        let without = Schedule::plan(&text, &without_automatic_comma, timing, start, start, SystemTime::UNIX_EPOCH, None).unwrap();
+        assert_eq!(deadlines, without.deadlines);
+        assert!(deadlines[after_comma] - deadlines[after_comma - 1] >= Duration::from_secs(1));
     }
 
     #[test]
-    fn repetition_and_long_words_change_the_cadence_differently() {
-        let text: Vec<_> = "sun Weather Sun bright sun watermelon".chars().collect();
+    fn familiar_phrases_flow_and_long_words_ease_in() {
+        let text: Vec<_> = "The same thing the same thing the same thing the synchronization".chars().collect();
         let spans: Vec<_> = word_spans(&text).collect();
-        let mut draws = [0.1, 0.25, 0.55, 0.65, 0.95, 0.9].into_iter();
-        let cadence = natural_cadence(&text, || draws.next().unwrap_or(0.5));
+        let cadence = natural_cadence(&text, || 0.0);
         let before = |index: usize| cadence[spans[index].start - 1].duration;
         assert_eq!(before(1), Duration::ZERO);
-        assert!(before(2) > Duration::ZERO);
-        assert!(before(4) > before(2) && before(4) < Duration::from_secs(2));
-        let weight = |word: usize, letter: usize| cadence[spans[word].start + letter].weight_offset;
-        assert_eq!(weight(1, 0), 0.0);
-        assert!(weight(2, 0) < 0.0);
-        assert!(weight(5, 0) > weight(5, 2) && weight(5, 2) > 0.0);
+        assert_eq!(before(2), Duration::ZERO);
+        assert!(before(3) > Duration::ZERO);
+        assert_eq!(before(4), Duration::ZERO);
+        assert_eq!(before(5), Duration::ZERO);
+        let last = spans.last().unwrap();
+        assert!(cadence[last.start].weight_offset > cadence[last.start + 4].weight_offset);
+    }
+
+    #[test]
+    fn abbreviations_and_decimals_do_not_start_a_sentence_pause() {
+        let text: Vec<_> = "Dr. Smith saw 3.14 grams. Then left.".chars().collect();
+        let cadence = natural_cadence(&text, || 0.0);
+        let starts: Vec<_> = word_spans(&text).map(|span| span.start).collect();
+        assert_eq!(cadence[starts[1] - 1].duration, Duration::ZERO);
+        assert_eq!(cadence[starts[4] - 1].duration, Duration::ZERO);
+        assert!(cadence[starts[6] - 1].duration >= Duration::from_millis(220));
     }
 
     #[test]
     fn natural_wpm_measures_typing_without_pauses() {
-        let text: Vec<_> = "sun. synchronization sun sun".chars().collect();
+        let text: Vec<_> = "sun. synchronization sun sun\n\nsun".chars().collect();
         let natural = natural_cadence(&text, || 0.9);
         let start = Instant::now();
         let timing = Timing {
