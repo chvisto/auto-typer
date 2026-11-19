@@ -424,7 +424,9 @@ impl Schedule {
             _ => 0.0,
         };
         let typing_budget = timed_budget.map(|(typing, _, _)| typing).or_else(|| {
-            timing.natural_writing.then(|| Duration::from_secs_f64(seconds_per_char * count as f64))
+            timing
+                .natural_writing
+                .then(|| Duration::from_secs_f64(seconds_per_char * count as f64))
         });
 
         let mut typing = Duration::ZERO;
@@ -2049,13 +2051,27 @@ mod tests {
             pauses: [Duration::from_secs(1), Duration::ZERO, Duration::ZERO],
             natural_writing: true,
         };
-        let schedule = Schedule::plan(&text, &natural, timing, start, start, SystemTime::UNIX_EPOCH, None).unwrap();
-        let pauses = Duration::from_secs(1) + natural.iter()
-            .filter(|step| step.covered_by & 1 == 0)
-            .map(|step| step.duration)
-            .sum::<Duration>();
+        let schedule = Schedule::plan(
+            &text,
+            &natural,
+            timing,
+            start,
+            start,
+            SystemTime::UNIX_EPOCH,
+            None,
+        )
+        .unwrap();
+        let pauses = Duration::from_secs(1)
+            + natural
+                .iter()
+                .filter(|step| step.covered_by & 1 == 0)
+                .map(|step| step.duration)
+                .sum::<Duration>();
         assert!(pauses > Duration::from_secs(1));
-        assert_eq!(schedule.deadlines.last().copied(), Some(Duration::from_millis(100 * text.len() as u64) + pauses));
+        assert_eq!(
+            schedule.deadlines.last().copied(),
+            Some(Duration::from_millis(100 * text.len() as u64) + pauses)
+        );
     }
 
     #[test]
