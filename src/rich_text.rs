@@ -52,7 +52,9 @@ fn clipboard_context(raw: &str) -> &str {
         return context;
     }
     // shortcut: marker-based selection covers producers that omit context offsets.
-    raw.find('<').and_then(|start| raw.get(start..)).unwrap_or(raw)
+    raw.find('<')
+        .and_then(|start| raw.get(start..))
+        .unwrap_or(raw)
 }
 
 #[derive(Default)]
@@ -266,7 +268,10 @@ impl TokenSink for FragmentSink {
                 hidden |= matches!(name, "head" | "script" | "style" | "template")
                     || tag.attrs.iter().any(|a| &*a.name.local == "hidden");
                 let attr = |name: &str| {
-                    tag.attrs.iter().find(|a| &*a.name.local == name).map(|a| &*a.value)
+                    tag.attrs
+                        .iter()
+                        .find(|a| &*a.name.local == name)
+                        .map(|a| &*a.value)
                 };
                 let semantic = (name != "title").then(|| heading_kind(name)).flatten();
                 let role = if attr("role") == Some("heading") {
@@ -279,7 +284,11 @@ impl TokenSink for FragmentSink {
                 };
                 if let Some(heading) = semantic
                     .or(role)
-                    .or_else(|| attr("class")?.split_ascii_whitespace().find_map(heading_kind))
+                    .or_else(|| {
+                        attr("class")?
+                            .split_ascii_whitespace()
+                            .find_map(heading_kind)
+                    })
                     .or_else(|| heading_kind(attr("data-style")?))
                 {
                     style.heading = heading;
@@ -478,7 +487,10 @@ mod tests {
             "</body></html>"
         );
         let start = "StartHTML:000000\r\nEndHTML:000000\r\n".len();
-        let raw = format!("StartHTML:{start:06}\r\nEndHTML:{:06}\r\n{body}", start + body.len());
+        let raw = format!(
+            "StartHTML:{start:06}\r\nEndHTML:{:06}\r\n{body}",
+            start + body.len()
+        );
         let styles = formats("Both", clipboard_context(&raw)).unwrap();
         assert!(styles.iter().all(|style| style.bold && style.italic));
 
