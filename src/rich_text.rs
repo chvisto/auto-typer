@@ -162,7 +162,7 @@ impl TokenSink for FragmentSink {
                 let name = tag.name.as_ref();
                 style.bold |= matches!(name, "b" | "strong");
                 style.italic |= matches!(name, "i" | "em");
-                if let Some(attribute) = tag.attrs.iter().find(|a| a.name.local.as_ref() == "style") {
+                if let Some(attribute) = tag.attrs.iter().find(|a| &*a.name.local == "style") {
                     for declaration in attribute.value.split(';') {
                         let Some((key, value)) = declaration.split_once(':') else { continue };
                         let value = value.split('!').next().unwrap_or_default().trim().to_ascii_lowercase();

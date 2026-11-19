@@ -557,7 +557,7 @@ impl eframe::App for AutoTyper {
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         self.text.clear_pending_paste();
         if self.active.is_none() && self.capture.is_none() && !self.reading
-            && ctx.memory(|memory| memory.has_focus(egui::Id::new(TEXT_EDITOR)))
+            && ctx.memory(|memory| memory.has_focus(egui::Id::unique(TEXT_EDITOR)))
             && let Some(plain) = input.events.iter().find_map(|event| {
                 if let egui::Event::Paste(text) = event { Some(text.as_str()) } else { None }
             })
@@ -797,7 +797,7 @@ impl AutoTyper {
                                 ui.fonts_mut(|fonts| fonts.layout_job(job))
                             };
                             ui.add(egui::TextEdit::multiline(&mut self.text)
-                                .id(egui::Id::new(TEXT_EDITOR))
+                                .id(egui::Id::unique(TEXT_EDITOR))
                                 .desired_rows(3)
                                 .desired_width(f32::INFINITY)
                                 .hint_text("Paste or type the text to send")
