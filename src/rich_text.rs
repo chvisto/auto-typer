@@ -153,31 +153,64 @@ fn normalize(text: &str) -> Cow<'_, str> {
 struct Fragment {
     parents: Vec<(LocalName, Style, bool)>,
     visible: Vec<(char, Style)>,
+    has_fragments: bool,
+    in_fragment: bool,
 }
 
 #[derive(Default)]
 struct FragmentSink(RefCell<Fragment>);
 
+fn is_ignored(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '\u{00AD}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}'
+        )
+}
+
 impl TokenSink for FragmentSink {
     type Handle = ();
 
     fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
-        let Fragment { parents, visible } = &mut *self.0.borrow_mut();
-        let (mut style, hidden) = parents
+        let Fragment {
+            parents,
+            visible,
+            has_fragments,
+            in_fragment,
+        } = &mut *self.0.borrow_mut();
+        let (mut style, mut hidden) = parents
             .last()
             .map_or((Style::default(), false), |p| (p.1, p.2));
         match token {
-            CharacterTokens(text) if !hidden => {
+            CharacterTokens(text) if !hidden && (!*has_fragments || *in_fragment) => {
                 visible.extend(
                     text.chars()
-                        .filter(|ch| !ch.is_whitespace())
+                        .filter(|ch| !is_ignored(*ch))
                         .map(|ch| (ch, style)),
                 );
             }
+            Token::CommentToken(comment) => match comment.trim() {
+                "StartFragment" => {
+                    if !*has_fragments {
+                        visible.clear();
+                        *has_fragments = true;
+                    }
+                    *in_fragment = true;
+                }
+                "EndFragment" if *has_fragments => {
+                    *in_fragment = false;
+                }
+                _ => {}
+            },
             TagToken(tag) if tag.kind == StartTag => {
                 let name = tag.name.as_ref();
-                style.bold |= matches!(name, "b" | "strong");
-                style.italic |= matches!(name, "i" | "em");
+                style.bold |= matches!(
+                    name,
+                    "b" | "strong" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "th"
+                );
+                style.italic |= matches!(name, "i" | "em" | "cite" | "dfn" | "var");
+                hidden |= matches!(name, "head" | "script" | "style" | "template")
+                    || tag.attrs.iter().any(|a| &*a.name.local == "hidden");
                 if let Some(attribute) = tag.attrs.iter().find(|a| &*a.name.local == "style") {
                     for declaration in attribute.value.split(';') {
                         let Some((key, value)) = declaration.split_once(':') else {
@@ -190,6 +223,10 @@ impl TokenSink for FragmentSink {
                             .trim()
                             .to_ascii_lowercase();
                         match key.trim().to_ascii_lowercase().as_str() {
+                            "display" if value == "none" => hidden = true,
+                            "visibility" if matches!(value.as_str(), "hidden" | "collapse") => {
+                                hidden = true
+                            }
                             "font-weight" => match value.as_str() {
                                 "bold" | "bolder" => style.bold = true,
                                 "normal" | "lighter" => style.bold = false,
@@ -229,7 +266,6 @@ impl TokenSink for FragmentSink {
                             | "wbr"
                     )
                 {
-                    let hidden = hidden || matches!(name, "head" | "script" | "style" | "template");
                     parents.push((tag.name, style, hidden));
                 }
             }
@@ -250,20 +286,34 @@ fn formats(plain: &str, html: &str) -> Option<Vec<Style>> {
     input.push_back(html.into());
     let _ = tokenizer.feed(&input);
     tokenizer.end();
-    let mut rich = tokenizer.sink.0.into_inner().visible.into_iter();
+    let rich = tokenizer.sink.0.into_inner().visible;
+    if rich.is_empty() {
+        return None;
+    }
+    let mut ri = 0;
+    let mut matched = 0usize;
+    let mut total = 0usize;
     let mut last = Style::default();
     let mut styles = Vec::with_capacity(plain.chars().count());
     for ch in plain.chars() {
-        if !ch.is_whitespace() {
-            let (actual, style) = rich.next()?;
-            if actual != ch {
-                return None;
+        if !is_ignored(ch) {
+            total += 1;
+            if let Some(&(actual, style)) = rich.get(ri)
+                && actual == ch
+            {
+                last = style;
+                ri += 1;
+                matched += 1;
+            } else if let Some(offset) = rich[ri..].iter().take(4).position(|&(c, _)| c == ch) {
+                ri += offset;
+                last = rich[ri].1;
+                ri += 1;
+                matched += 1;
             }
-            last = style;
         }
         styles.push(last);
     }
-    rich.next().is_none().then_some(styles)
+    (matched > 0 && matched * 5 >= total * 4 && matched * 5 >= rich.len() * 4).then_some(styles)
 }
 
 #[cfg(test)]
@@ -314,5 +364,30 @@ mod tests {
         let styles = formats(plain, "<span style='font-weight:700'>Pace</span> matters").unwrap();
         assert!(styles[0].bold);
         assert!(!styles[5].bold);
+    }
+
+    #[test]
+    fn fragment_markers_zero_width_hidden_and_lists_preserve_styles() {
+        let plain = "Bold\u{200B} and italic";
+        let html = concat!(
+            "<html><body>Ignored chrome<b>",
+            "<!--StartFragment-->",
+            "<span style='display:none'>secret</span>",
+            "Bold and <span style='font-style:italic'>italic</span>",
+            "<!--EndFragment-->",
+            "</b>Trailing</body></html>"
+        );
+        let styles = formats(plain, html).unwrap();
+        assert!(styles[0].bold);
+        assert!(!styles[0].italic);
+        assert!(styles[10].bold);
+        assert!(styles[10].italic);
+
+        let list_plain = "• Bold item\n• Italic item";
+        let list_html = "<ul><li><b>Bold</b> item</li><li><i>Italic</i> item</li></ul>";
+        let list_styles = formats(list_plain, list_html).unwrap();
+        assert!(list_styles[2].bold);
+        assert!(!list_styles[7].bold);
+        assert!(list_styles[14].italic);
     }
 }
