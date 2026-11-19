@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod docx;
 mod rich_text;
 use std::{
     env, fs, io,
@@ -557,10 +558,32 @@ impl AutoTyper {
 impl eframe::App for AutoTyper {
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         self.text.clear_pending_paste();
-        if self.active.is_none()
-            && self.capture.is_none()
-            && !self.reading
-            && ctx.memory(|memory| memory.has_focus(egui::Id::unique(TEXT_EDITOR)))
+        if self.active.is_some() || self.capture.is_some() || self.reading {
+            return;
+        }
+        let open = input.events.iter().any(|event| {
+            matches!(event, egui::Event::Key {
+                key: egui::Key::O, pressed: true, repeat: false, modifiers, ..
+            } if modifiers.ctrl && !modifiers.alt && !modifiers.shift)
+        });
+        let dropped = std::mem::take(&mut input.dropped_files);
+        if open || !dropped.is_empty() {
+            let selection = match dropped.as_slice() {
+                [] => docx::choose(foreground_window()),
+                [file] => Ok(file.path.clone()),
+                _ => Err("Drop one Word document at a time.".into()),
+            };
+            match selection.and_then(|path| path.as_deref().map(docx::read).transpose()) {
+                Ok(Some(document)) => {
+                    self.text.append_document(document);
+                    self.status = Status::Ready;
+                }
+                Ok(None) => {}
+                Err(message) => self.status = Status::Error(message),
+            }
+            return;
+        }
+        if ctx.memory(|memory| memory.has_focus(egui::Id::unique(TEXT_EDITOR)))
             && let Some(plain) = input.events.iter().find_map(|event| {
                 if let egui::Event::Paste(text) = event {
                     Some(text.as_str())
@@ -806,10 +829,11 @@ impl AutoTyper {
                                 .id(egui::Id::unique(TEXT_EDITOR))
                                 .desired_rows(3)
                                 .desired_width(f32::INFINITY)
-                                .hint_text("Paste or type the text to send")
+                                .hint_text("Paste, type or drop a Word document")
                                 .frame(egui::Frame::new())
                                 .layouter(&mut layouter))
                                 .labelled_by(editor_label)
+                                .on_hover_text("Drop a .docx file or press Ctrl+O. Imported text goes below any existing text.")
                         })
                         .inner;
                     ui.separator();
@@ -1321,7 +1345,9 @@ fn run_job(
         if let Some(styles) = styles {
             let mut style = styles[sent];
             if let Some(editor) = editor {
-                if ch != '\n' && (sent == 0 || text[sent - 1] == '\n') && style.heading != paragraph
+                if ch != '\n'
+                    && (sent == 0 || text[sent - 1] == '\n')
+                    && (style.heading != paragraph || style.heading != Heading::Body)
                 {
                     if !editor.apply(target, style.heading, &mut enigo, events)? {
                         return Ok(false);

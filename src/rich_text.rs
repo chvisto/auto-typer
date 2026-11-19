@@ -73,6 +73,19 @@ impl std::ops::Deref for Document {
 }
 
 impl Document {
+    pub fn push(&mut self, text: &str, style: Style) {
+        self.text.push_str(text);
+        self.styles.extend(std::iter::repeat_n(style, text.chars().count()));
+    }
+
+    pub fn append_document(&mut self, other: Self) {
+        if !self.text.is_empty() && !self.text.ends_with('\n') {
+            self.push("\n", Style::default());
+        }
+        self.text.push_str(&other.text);
+        self.styles.extend(other.styles);
+    }
+
     pub fn styles(&self) -> &[Style] {
         &self.styles
     }
@@ -212,7 +225,7 @@ fn is_ignored(ch: char) -> bool {
         )
 }
 
-fn heading_kind(value: &str) -> Option<Heading> {
+pub(crate) fn heading_kind(value: &str) -> Option<Heading> {
     let value = value.trim_matches([' ', '\'', '"']).to_ascii_lowercase();
     let value = value.strip_prefix("mso").unwrap_or(&value);
     if value == "title" || value == "document-title" {
