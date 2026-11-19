@@ -246,6 +246,7 @@ struct NaturalStep {
     duration: Duration,
     covered_by: u8,
     weight_offset: f64,
+    jitter_offset: f32,
 }
 
 fn word_spans(text: &[char]) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
@@ -331,6 +332,9 @@ fn natural_cadence(text: &[char], mut sample: impl FnMut() -> f64) -> Vec<Natura
         }
         previous_end = Some(span.end);
     }
+    for step in &mut steps {
+        step.jitter_offset = ((sample() - 0.5) * 0.4) as f32;
+    }
     steps
 }
 
@@ -369,7 +373,9 @@ impl Schedule {
         };
         let weight = |index: usize| {
             if timing.natural_writing {
-                1.0 + natural.get(index).map_or(0.0, |step| step.weight_offset)
+                natural.get(index).map_or(1.0, |step| {
+                    (1.0 + step.weight_offset) * (1.0 + f64::from(step.jitter_offset))
+                })
             } else {
                 1.0
             }
@@ -417,10 +423,13 @@ impl Schedule {
             Pace::Wpm(wpm) => 60.0 / (5.0 * f64::from(wpm)),
             _ => 0.0,
         };
+        let typing_budget = timed_budget.map(|(typing, _, _)| typing).or_else(|| {
+            timing.natural_writing.then(|| Duration::from_secs_f64(seconds_per_char * count as f64))
+        });
 
         let mut typing = Duration::ZERO;
         let mut typed_weight = 0.0;
-        let total_weight = if timed_budget.is_some() {
+        let total_weight = if typing_budget.is_some() {
             (first..text.len()).map(weight).sum::<f64>()
         } else {
             0.0
@@ -435,8 +444,8 @@ impl Schedule {
             };
             let weight = weight(index);
             typed_weight += weight;
-            typing = match timed_budget {
-                Some((budget, _, _)) => budget.mul_f64(typed_weight / total_weight),
+            typing = match typing_budget {
+                Some(budget) => budget.mul_f64(typed_weight / total_weight),
                 None => {
                     typing
                         + Duration::from_secs_f64(
@@ -1293,7 +1302,7 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
                 });
             }
             ui.checkbox(&mut options.natural_writing, "Natural writing")
-                .on_hover_text("Uses word frequency, longer words and sentence breaks to vary the pace. Timed modes fit pauses into the remaining time.");
+                .on_hover_text("Uses word frequency, longer words and sentence breaks to vary the pace. WPM excludes pauses. Timed modes fit pauses into the remaining time.");
         });
 }
 
@@ -2019,7 +2028,7 @@ mod tests {
         let text: Vec<_> = "sun Weather Sun bright sun watermelon".chars().collect();
         let spans: Vec<_> = word_spans(&text).collect();
         let mut draws = [0.1, 0.25, 0.55, 0.65, 0.95, 0.9].into_iter();
-        let cadence = natural_cadence(&text, || draws.next().unwrap());
+        let cadence = natural_cadence(&text, || draws.next().unwrap_or(0.5));
         let before = |index: usize| cadence[spans[index].start - 1].duration;
         assert_eq!(before(1), Duration::ZERO);
         assert!(before(2) > Duration::ZERO);
@@ -2028,6 +2037,25 @@ mod tests {
         assert_eq!(weight(1, 0), 0.0);
         assert!(weight(2, 0) < 0.0);
         assert!(weight(5, 0) > weight(5, 2) && weight(5, 2) > 0.0);
+    }
+
+    #[test]
+    fn natural_wpm_measures_typing_without_pauses() {
+        let text: Vec<_> = "sun. synchronization sun sun".chars().collect();
+        let natural = natural_cadence(&text, || 0.9);
+        let start = Instant::now();
+        let timing = Timing {
+            pace: Pace::Wpm(120),
+            pauses: [Duration::from_secs(1), Duration::ZERO, Duration::ZERO],
+            natural_writing: true,
+        };
+        let schedule = Schedule::plan(&text, &natural, timing, start, start, SystemTime::UNIX_EPOCH, None).unwrap();
+        let pauses = Duration::from_secs(1) + natural.iter()
+            .filter(|step| step.covered_by & 1 == 0)
+            .map(|step| step.duration)
+            .sum::<Duration>();
+        assert!(pauses > Duration::from_secs(1));
+        assert_eq!(schedule.deadlines.last().copied(), Some(Duration::from_millis(100 * text.len() as u64) + pauses));
     }
 
     #[test]
