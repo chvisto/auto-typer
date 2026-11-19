@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
+    env, fs,
     io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    path::PathBuf,
     ptr,
     sync::{Arc, mpsc},
     thread,
@@ -28,6 +30,8 @@ const BLACK: Color32 = Color32::BLACK;
 const WHITE: Color32 = Color32::WHITE;
 const MUTED: Color32 = Color32::from_gray(160);
 const BORDER: Color32 = Color32::from_gray(30);
+const SURFACE: Color32 = Color32::from_gray(10);
+const SEMIBOLD: &str = "Segoe Semibold";
 const HOTKEY_ID: i32 = 1;
 
 fn main() -> eframe::Result {
@@ -58,7 +62,8 @@ fn main() -> eframe::Result {
             visuals.widgets.inactive.weak_bg_fill = Color32::from_gray(11);
             visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
             visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, MUTED);
-            visuals.widgets.active.bg_stroke = Stroke::new(1.0, WHITE);
+            visuals.widgets.active.bg_stroke = Stroke::new(2.0, WHITE);
+            set_typography(&cc.egui_ctx);
             cc.egui_ctx.set_theme(egui::Theme::Dark);
             cc.egui_ctx.set_visuals_of(egui::Theme::Dark, visuals);
             cc.egui_ctx.style_mut_of(egui::Theme::Dark, |style| {
@@ -74,6 +79,29 @@ fn main() -> eframe::Result {
             Ok(Box::new(AutoTyper::default()))
         }),
     )
+}
+
+fn set_typography(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    let font_dir = env::var_os("WINDIR").map(|path| PathBuf::from(path).join("Fonts"));
+    for (name, file, family) in [
+        ("Segoe UI", "segoeui.ttf", egui::FontFamily::Proportional),
+        (SEMIBOLD, "seguisb.ttf", egui::FontFamily::Name(SEMIBOLD.into())),
+    ] {
+        let fallback = fonts.families[&egui::FontFamily::Proportional].clone();
+        let family = fonts.families.entry(family).or_insert(fallback);
+        if let Some(directory) = &font_dir
+            && let Ok(data) = fs::read(directory.join(file))
+        {
+            fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(data)));
+            family.insert(0, name.into());
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
+fn emphasis(text: impl Into<String>, size: f32) -> RichText {
+    RichText::new(text).font(egui::FontId::new(size, egui::FontFamily::Name(SEMIBOLD.into())))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -404,6 +432,8 @@ struct AutoTyper {
     always_on_top: bool,
     status: Status,
     active: Option<ActiveRun>,
+    capture: Option<(Instant, mpsc::Receiver<egui::ColorImage>)>,
+    countdown_backdrop: Option<egui::TextureHandle>,
     reading: bool,
     timing_open: bool,
     applied_timing: Option<Timing>,
@@ -413,6 +443,29 @@ struct AutoTyper {
 }
 
 impl AutoTyper {
+    fn prepare_start(&mut self, ctx: &egui::Context) {
+        let (send, receive) = mpsc::channel();
+        self.capture = Some((Instant::now(), receive));
+        self.status = Status::Starting;
+        let repaint = ctx.clone();
+        ctx.request_screenshot(move |image| {
+            let _ = send.send(blurred_backdrop(&image));
+            repaint.request_repaint();
+        });
+        ctx.request_repaint_after(Duration::from_millis(150));
+    }
+
+    fn stop(&mut self) {
+        if self.capture.take().is_some() {
+            self.status = Status::Stopped;
+        } else if let Some(run) = &self.active {
+            self.status = match signal(&run.events.stop) {
+                Ok(()) => Status::Stopping,
+                Err(error) => Status::Error(format!("Could not stop typing. {error}")),
+            };
+        }
+    }
+
     fn start(&mut self, ctx: &egui::Context) -> Result<(), String> {
         let text: Vec<char> = self.text.chars().collect();
         if text.is_empty() {
@@ -483,6 +536,25 @@ impl AutoTyper {
 
 impl eframe::App for AutoTyper {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some((requested_at, receiver)) = &self.capture {
+            let image = match receiver.try_recv() {
+                Ok(image) => Some(Some(image)),
+                Err(mpsc::TryRecvError::Empty) if requested_at.elapsed() < Duration::from_millis(150) => {
+                    ctx.request_repaint_after(Duration::from_millis(150).saturating_sub(requested_at.elapsed()));
+                    None
+                }
+                Err(_) => Some(None),
+            };
+            if let Some(image) = image {
+                self.capture = None;
+                self.countdown_backdrop = image.map(|image| {
+                    ctx.load_texture("countdown backdrop", image, egui::TextureOptions::LINEAR)
+                });
+                if let Err(message) = self.start(ctx) {
+                    self.status = Status::Error(message);
+                }
+            }
+        }
         if let Some(run) = &self.active {
             loop {
                 match run.updates.try_recv() {
@@ -520,15 +592,16 @@ impl eframe::App for AutoTyper {
                 }
             }
         }
-        if let Status::Countdown(end) = self.status {
-            let remaining = end.saturating_duration_since(Instant::now());
-            let until_next_second = Duration::from_nanos(u64::from(remaining.subsec_nanos()));
-            ctx.request_repaint_after(until_next_second.max(Duration::from_millis(16)));
+        if matches!(self.status, Status::Countdown(_)) {
+            ctx.request_repaint_after(Duration::from_millis(40));
         } else if self.options.mode == TimingMode::FinishAt
             && (!self.reading || self.timing_open)
             && ctx.input(|input| input.viewport().focused == Some(true))
         {
             ctx.request_repaint_after(Duration::from_secs(1));
+        }
+        if !matches!(self.status, Status::Starting | Status::Countdown(_) | Status::Stopping) {
+            self.countdown_backdrop = None;
         }
     }
 
@@ -537,6 +610,10 @@ impl eframe::App for AutoTyper {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if let Status::Countdown(end) = self.status {
+            self.countdown_view(ui, end);
+            return;
+        }
         egui::Panel::bottom("actions")
             .resizable(false)
             .frame(
@@ -544,14 +621,14 @@ impl eframe::App for AutoTyper {
                     .fill(BLACK)
                     .inner_margin(egui::Margin::symmetric(22, 12)),
             )
-            .show(ui, |ui| self.actions(ui));
+            .show(ui, |ui| centered_column(ui, |ui| self.actions(ui)));
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(BLACK)
                     .inner_margin(egui::Margin::symmetric(22, 12)),
             )
-            .show(ui, |ui| {
+            .show(ui, |ui| centered_column(ui, |ui| {
                 if self.reading {
                     self.reading_view(ui);
                 } else {
@@ -559,152 +636,150 @@ impl eframe::App for AutoTyper {
                         .id_salt("setup")
                         .show(ui, |ui| self.editor(ui));
                 }
-            });
+            }));
     }
 }
 
 impl AutoTyper {
+    fn countdown_view(&mut self, ui: &mut egui::Ui, end: Instant) {
+        let bounds = ui.max_rect();
+        if let Some(backdrop) = &self.countdown_backdrop {
+            ui.painter().image(
+                backdrop.id(),
+                bounds,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                WHITE,
+            );
+        }
+        ui.painter().rect_filled(bounds, 0, Color32::from_black_alpha(125));
+
+        let remaining = end.saturating_duration_since(Instant::now()).as_secs_f32();
+        let fraction = (remaining / self.options.countdown.max(1) as f32).clamp(0.0, 1.0);
+        let center = bounds.center() - egui::vec2(0.0, 43.0);
+        let radius = (bounds.height() * 0.19).clamp(60.0, 96.0);
+        ui.painter().circle_stroke(center, radius, Stroke::new(2.0, Color32::from_gray(74)));
+        let arc: Vec<_> = (0..=96)
+            .map(|step| {
+                let angle = std::f32::consts::TAU * fraction * step as f32 / 96.0
+                    - std::f32::consts::FRAC_PI_2;
+                center + egui::vec2(angle.cos(), angle.sin()) * radius
+            })
+            .collect();
+        ui.painter().add(egui::Shape::line(arc, Stroke::new(2.25, WHITE)));
+        let timer = egui::Rect::from_center_size(center, egui::Vec2::splat(radius * 2.0));
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(timer)
+                .layout(egui::Layout::centered_and_justified(egui::Direction::TopDown)),
+            |ui| {
+                ui.add(egui::Label::new(emphasis(format!("{:.0}", remaining.ceil()), radius * 1.05))
+                    .selectable(false));
+            },
+        );
+        let caption = egui::Rect::from_min_max(
+            egui::pos2(bounds.left() + 18.0, center.y + radius + 20.0),
+            bounds.right_bottom() - egui::vec2(18.0, 8.0),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(caption).layout(egui::Layout::top_down(egui::Align::Center)),
+            |ui| {
+                ui.label(emphasis("Focus the destination field", 17.0));
+                ui.add_space(10.0);
+                if ui.add(egui::Button::new("Cancel countdown").min_size(egui::vec2(137.0, 34.0))).clicked() {
+                    self.stop();
+                }
+                ui.label(RichText::new("Esc").monospace().weak().size(12.0));
+            },
+        );
+    }
+
     fn editor(&mut self, ui: &mut egui::Ui) {
-        let enabled = self.active.is_none();
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("AutoTyper").size(28.0).strong());
+        let enabled = self.active.is_none() && self.capture.is_none();
+        ui.add_space(5.0);
+        let editor_label = ui.horizontal(|ui| {
+            let label = ui.label(emphasis("Text to type", 26.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .checkbox(&mut self.always_on_top, "Always on Top")
-                    .changed()
-                {
-                    let level = if self.always_on_top {
-                        egui::WindowLevel::AlwaysOnTop
-                    } else {
-                        egui::WindowLevel::Normal
-                    };
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+                if ui.checkbox(&mut self.always_on_top, "Always on Top").changed() {
+                    let level = if self.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
                 }
             });
-        });
-        ui.add_space(10.0);
+            label.id
+        }).inner;
+        ui.add_space(7.0);
 
         ui.add_enabled_ui(enabled, |ui| {
-            let editor_label = ui
-                .horizontal(|ui| {
-                    let label = ui.label(RichText::new("Text to type").strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "{} characters  ·  {} words",
-                                self.text.chars().count(),
-                                self.text.split_whitespace().count()
-                            ))
-                            .weak()
-                            .size(12.0),
-                        );
-                    });
-                    label.id
-                })
-                .inner;
-            egui::Frame::new()
-                .stroke(Stroke::new(1.0, BORDER))
-                .inner_margin(egui::Margin::symmetric(10, 6))
-                .corner_radius(8)
+            let response = egui::Frame::new()
+                .fill(SURFACE).stroke(Stroke::new(1.0, BORDER))
+                .inner_margin(egui::Margin::symmetric(12, 9)).corner_radius(12)
                 .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("editor")
-                        .max_height(123.0)
-                        .show(ui, |ui| {
-                            if ui
-                                .add(
-                                    egui::TextEdit::multiline(&mut self.text)
-                                        .desired_rows(7)
-                                        .desired_width(f32::INFINITY)
-                                        .hint_text("Paste a paragraph or type here")
-                                        .frame(egui::Frame::new()),
-                                )
-                                .labelled_by(editor_label)
-                                .changed()
-                                && self.text.contains('\r')
-                            {
-                                self.text = self.text.replace("\r\n", "\n").replace('\r', "\n");
-                            }
-                        });
+                    let response = egui::ScrollArea::vertical().id_salt("editor").max_height(121.0).show(ui, |ui| {
+                        let response = ui.add(egui::TextEdit::multiline(&mut self.text)
+                            .desired_rows(7).desired_width(f32::INFINITY)
+                            .hint_text("Paste a paragraph or type here").frame(egui::Frame::new()))
+                            .labelled_by(editor_label);
+                        if response.changed() && self.text.contains('\r') {
+                            self.text = self.text.replace("\r\n", "\n").replace('\r', "\n");
+                        }
+                        response
+                    }).inner;
+                    ui.separator();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format!(
+                            "{} characters  ·  {} words", self.text.chars().count(),
+                            self.text.split_whitespace().count()
+                        )).weak().size(12.0));
+                    });
+                    response
                 });
-            ui.add_space(10.0);
+            if response.inner.has_focus() {
+                ui.painter().rect_stroke(response.response.rect, 12, Stroke::new(2.0, MUTED), egui::StrokeKind::Inside);
+            }
+            ui.add_space(11.0);
             timing_fields(ui, &mut self.options);
-            ui.add_space(5.0);
-            ui.separator();
-            ui.horizontal(|ui| {
-                let label = ui.label("Start countdown");
-                ui.add(
-                    egui::DragValue::new(&mut self.options.countdown)
-                        .range(1..=60)
-                        .suffix(" s"),
-                )
-                .labelled_by(label.id);
-            });
         });
     }
 
     fn actions(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(ui.available_width());
-        ui.separator();
         if self.reading && self.timing_open {
-            egui::ScrollArea::vertical()
-                .id_salt("live-timing")
-                .max_height(215.0)
-                .show(ui, |ui| {
-                    timing_fields(ui, &mut self.options);
-                    if ui.button("Apply timing").clicked() {
-                        self.apply_timing();
-                    }
-                    match &self.timing_feedback {
-                        Some(Ok(())) => {
-                            ui.label(RichText::new("Timing updated").weak());
-                        }
-                        Some(Err(message)) => {
-                            ui.label(message);
-                        }
-                        None => {}
-                    }
-                });
-            ui.separator();
+            egui::ScrollArea::vertical().id_salt("live-timing").max_height(213.0)
+                .show(ui, |ui| timing_fields(ui, &mut self.options));
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Apply timing").clicked() {
+                    self.apply_timing();
+                }
+                match &self.timing_feedback {
+                    Some(Ok(())) => { ui.label(RichText::new("Timing updated").weak()); }
+                    Some(Err(message)) => { ui.label(message); }
+                    None => {}
+                }
+            });
+            ui.add_space(5.0);
         }
 
         let status = match &self.status {
-            Status::Ready | Status::Typing | Status::Completed => None,
-            Status::Starting => Some("Starting…".to_owned()),
-            Status::Countdown(end) => Some(format!(
-                "Click your target field · {:.0} s",
-                end.saturating_duration_since(Instant::now())
-                    .as_secs_f64()
-                    .ceil()
-            )),
-            Status::FocusPaused => Some("Focus the original target to resume".to_owned()),
-            Status::Stopping => Some("Stopping…".to_owned()),
-            Status::Stopped if !self.reading => Some("Stopped".to_owned()),
+            Status::Ready | Status::Typing | Status::Completed | Status::Countdown(_) => None,
+            Status::Starting => Some("Starting…"),
+            Status::FocusPaused => Some("Focus the original target to resume"),
+            Status::Stopping => Some("Stopping…"),
+            Status::Stopped if !self.reading => Some("Stopped"),
             Status::Stopped => None,
-            Status::Error(message) => Some(message.clone()),
+            Status::Error(message) => Some(message.as_str()),
         };
         if let Some(status) = status {
             ui.label(status);
+            ui.add_space(3.0);
         }
 
         ui.horizontal(|ui| {
-            let running = self.active.is_some();
+            let running = self.active.is_some() || self.capture.is_some();
             if self.reading && !running {
                 if ui.add(primary("Back to editor")).clicked() {
                     self.reading = false;
                     self.status = Status::Ready;
                 }
             } else if running {
-                if ui
-                    .add_enabled(!matches!(self.status, Status::Stopping), primary("Stop"))
-                    .clicked()
-                    && let Some(run) = &self.active
-                {
-                    self.status = match signal(&run.events.stop) {
-                        Ok(()) => Status::Stopping,
-                        Err(error) => Status::Error(format!("Could not stop typing. {error}")),
-                    };
+                if ui.add_enabled(!matches!(self.status, Status::Stopping), primary("Stop")).clicked() {
+                    self.stop();
                 }
                 ui.label(RichText::new("Esc").monospace().weak().size(12.0));
                 if self.reading {
@@ -713,14 +788,14 @@ impl AutoTyper {
                     });
                 }
             } else {
-                let start = ui.add_enabled(!self.text.is_empty(), primary("Start typing"));
-                if start.clicked()
-                    && let Err(message) = self.start(ui.ctx())
-                {
-                    self.status = Status::Error(message);
+                if ui.add_enabled(!self.text.is_empty(), primary("Start typing")).clicked() {
+                    self.prepare_start(ui.ctx());
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new("Esc to stop").weak().size(12.0));
+                    let value = ui.add(egui::DragValue::new(&mut self.options.countdown)
+                        .range(1..=60).suffix(" s"));
+                    let label = ui.label(RichText::new("Countdown").weak().size(13.0));
+                    value.labelled_by(label.id);
                 });
             }
         });
@@ -735,7 +810,7 @@ impl AutoTyper {
             _ => "Typing",
         };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(heading).size(26.0).strong());
+            ui.label(emphasis(heading, 26.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     RichText::new(format!("{} / {} characters", self.sent, self.total))
@@ -792,92 +867,157 @@ impl AutoTyper {
     }
 }
 
+fn centered_column(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let mut bounds = ui.available_rect_before_wrap();
+    let inset = ((bounds.width() - 540.0) * 0.5).max(0.0);
+    bounds.min.x += inset;
+    bounds.max.x -= inset;
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(bounds).layout(egui::Layout::top_down(egui::Align::Min)),
+        |ui| {
+            ui.set_min_width(bounds.width());
+            add(ui);
+        },
+    );
+}
+
 fn primary(label: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(label).strong().color(BLACK))
+    egui::Button::new(emphasis(label, 14.0).color(BLACK))
         .fill(WHITE)
-        .min_size(egui::vec2(114.0, 36.0))
-        .corner_radius(7)
+        .min_size(egui::vec2(132.0, 38.0))
+        .corner_radius(8)
 }
 
 fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
-    ui.horizontal_wrapped(|ui| {
-        ui.radio_value(&mut options.mode, TimingMode::Wpm, "Target WPM");
-        ui.radio_value(&mut options.mode, TimingMode::Duration, "Total time");
-        ui.radio_value(&mut options.mode, TimingMode::FinishAt, "Finish by");
-    });
+    ui.label(emphasis("Timing", 15.0));
+    egui::Frame::new().fill(SURFACE).stroke(Stroke::new(1.0, BORDER))
+        .inner_margin(4).corner_radius(10)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let width = (ui.available_width() - 8.0) / 3.0;
+                for (mode, name) in [
+                    (TimingMode::Wpm, "Target WPM"),
+                    (TimingMode::Duration, "Total time"),
+                    (TimingMode::FinishAt, "Finish by"),
+                ] {
+                    let selected = options.mode == mode;
+                    let color = if selected { BLACK } else { MUTED };
+                    let button = egui::Button::new(emphasis(name, 13.0).color(color))
+                        .selected(selected)
+                        .fill(if selected { WHITE } else { SURFACE })
+                        .corner_radius(6);
+                    if ui.add_sized([width, 30.0], button).clicked() {
+                        options.mode = mode;
+                    }
+                }
+            });
+        });
     match options.mode {
         TimingMode::Wpm => {
             ui.horizontal(|ui| {
                 let label = ui.label("Typing speed");
-                ui.add(
-                    egui::DragValue::new(&mut options.wpm)
-                        .range(1..=600)
-                        .suffix(" WPM"),
-                )
-                .labelled_by(label.id);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(egui::DragValue::new(&mut options.wpm).range(1..=600).suffix(" WPM"))
+                        .labelled_by(label.id);
+                });
             });
         }
         TimingMode::Duration => {
             ui.horizontal(|ui| {
                 let label = ui.label("Time after countdown");
-                ui.add(
-                    egui::DragValue::new(&mut options.total_seconds)
-                        .range(0.1..=86_400.0)
-                        .speed(0.1)
-                        .fixed_decimals(1)
-                        .suffix(" s"),
-                )
-                .labelled_by(label.id);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(egui::DragValue::new(&mut options.total_seconds)
+                        .range(0.1..=86_400.0).speed(0.1).fixed_decimals(1).suffix(" s"))
+                        .labelled_by(label.id);
+                });
             });
         }
         TimingMode::FinishAt => {
             let now = Local::now();
             ui.horizontal_wrapped(|ui| {
                 let label = ui.label("Finish by");
-                ui.add(
-                    egui::TextEdit::singleline(&mut options.finish_at)
-                        .desired_width(90.0)
-                        .font(egui::TextStyle::Monospace)
-                        .hint_text("HH:MM:SS"),
-                )
-                .labelled_by(label.id);
-                ui.label(
-                    RichText::new(format!("PC clock {}", now.format("%H:%M:%S")))
-                        .weak()
-                        .size(12.0),
-                );
+                ui.add(egui::TextEdit::singleline(&mut options.finish_at)
+                    .desired_width(89.0).font(egui::TextStyle::Monospace).hint_text("HH:MM:SS"))
+                    .labelled_by(label.id);
+                ui.label(RichText::new(format!("PC clock {}", now.format("%H:%M:%S"))).weak().size(12.0));
             });
             if !options.finish_at.trim().is_empty() {
                 let message = match next_finish(&options.finish_at, now) {
-                    Ok(finish) => format!("{}", finish.format("%a, %b %e  ·  %H:%M:%S local")),
+                    Ok(time) => time.format("%a, %b %e  ·  %H:%M:%S local").to_string(),
                     Err(message) => message,
                 };
                 ui.label(RichText::new(message).weak().size(12.0));
             }
         }
     }
-    ui.add_space(4.0);
-    egui::Grid::new("punctuation")
-        .spacing([14.0, 3.0])
+
+    ui.add_space(5.0);
+    ui.label(emphasis("Punctuation pauses", 15.0));
+    egui::Frame::new().fill(SURFACE).stroke(Stroke::new(1.0, BORDER))
+        .inner_margin(egui::Margin::symmetric(10, 5)).corner_radius(12)
         .show(ui, |ui| {
-            for (pause, label) in options.pauses.iter_mut().zip([
-                "Pause at periods",
-                "Pause at commas",
-                "Pause at new lines",
-            ]) {
-                let checkbox = ui.checkbox(&mut pause.enabled, label);
-                ui.add_enabled(
-                    pause.enabled,
-                    egui::DragValue::new(&mut pause.seconds)
-                        .range(0.0..=600.0)
-                        .speed(0.1)
-                        .fixed_decimals(1)
-                        .suffix(" s"),
-                )
-                .labelled_by(checkbox.id);
-                ui.end_row();
+            for (index, (pause, label)) in options.pauses.iter_mut()
+                .zip(["Periods", "Commas", "New lines"]).enumerate()
+            {
+                if index > 0 {
+                    ui.separator();
+                }
+                ui.horizontal(|ui| {
+                    let checkbox = ui.checkbox(&mut pause.enabled, label);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_enabled(pause.enabled, egui::DragValue::new(&mut pause.seconds)
+                            .range(0.0..=600.0).speed(0.1).fixed_decimals(1).suffix(" s"))
+                            .labelled_by(checkbox.id);
+                    });
+                });
             }
         });
+}
+
+fn blurred_backdrop(source: &egui::ColorImage) -> egui::ColorImage {
+    let [width, height] = source.size;
+    if width == 0 || height == 0 {
+        return egui::ColorImage::new([1, 1], vec![BLACK]);
+    }
+    let stride = width.max(height).div_ceil(168).max(1);
+    let size = [width.div_ceil(stride), height.div_ceil(stride)];
+    let [cols, rows] = size;
+    let mut pixels = Vec::with_capacity(cols * rows);
+    for y in 0..rows {
+        for x in 0..cols {
+            let (x0, y0) = (x * stride, y * stride);
+            let (x1, y1) = ((x0 + stride).min(width), (y0 + stride).min(height));
+            let mut sum = 0;
+            for sy in y0..y1 {
+                for pixel in &source.pixels[sy * width + x0..sy * width + x1] {
+                    sum += usize::from(pixel.r());
+                }
+            }
+            pixels.push((sum / ((x1 - x0) * (y1 - y0))) as u32);
+        }
+    }
+
+    // A small separable Gaussian softens the captured frame once per countdown.
+    let taps = [1, 4, 6, 4, 1];
+    let mut horizontal = vec![0; pixels.len()];
+    for y in 0..rows {
+        for x in 0..cols {
+            horizontal[y * cols + x] = taps.iter().enumerate().map(|(offset, weight)| {
+                let neighbor = (x + offset).saturating_sub(2).min(cols - 1);
+                weight * pixels[y * cols + neighbor]
+            }).sum::<u32>();
+        }
+    }
+    let blurred = (0..pixels.len()).map(|index| {
+        let (x, y) = (index % cols, index / cols);
+        let weight = taps.iter().enumerate().map(|(offset, weight)| {
+            let neighbor = (y + offset).saturating_sub(2).min(rows - 1);
+            weight * horizontal[neighbor * cols + x]
+        }).sum::<u32>();
+        Color32::from_gray((weight / 256) as u8)
+    }).collect();
+    egui::ColorImage::new(size, blurred)
 }
 
 struct EscapeHotkey;
@@ -1041,6 +1181,22 @@ fn foreground_window() -> HWND {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backdrop_blurs_pixels_and_limits_texture_size() {
+        let mut source = egui::ColorImage::new([7, 7], vec![BLACK; 49]);
+        source.pixels[24] = WHITE;
+        let backdrop = blurred_backdrop(&source);
+        assert_eq!(backdrop.size, [7, 7]);
+        assert!((1..255).contains(&backdrop.pixels[24].r()));
+        assert!(backdrop.pixels[23].r() > 0);
+        assert_eq!(backdrop.pixels[0], BLACK);
+
+        let wide = egui::ColorImage::new([600, 300], vec![BLACK; 600 * 300]);
+        let downsampled = blurred_backdrop(&wide);
+        assert_eq!(downsampled.size, [150, 75]);
+        assert!(downsampled.pixels.iter().all(|&pixel| pixel == BLACK));
+    }
 
     fn planned(text: &str, timing: Timing) -> Result<Schedule, String> {
         let start = Instant::now();
