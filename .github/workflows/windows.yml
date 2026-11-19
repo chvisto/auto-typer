@@ -23,7 +23,18 @@ jobs:
             ~/.cargo/registry
             target/release
           key: windows-x64-release-${{ hashFiles('Cargo.toml', '.cargo/config.toml') }}
-      - run: cargo +stable fmt --all --check
+      - name: Report Windows build start
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          gh api "repos/$env:GITHUB_REPOSITORY/statuses/$env:GITHUB_SHA" -f "state=pending" -f "context=AutoTyper / Windows release" -f "target_url=$runUrl" --silent
+      - run: cargo +stable fmt --all
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: formatted-source
+          path: src/main.rs
+          if-no-files-found: error
       - run: cargo +stable test --release --locked
       - run: cargo +stable build --release --locked
       - name: Verify GUI executable
