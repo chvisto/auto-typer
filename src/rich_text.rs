@@ -58,7 +58,11 @@ impl Document {
         let mut start = 0;
         let mut format = None;
         for (index, (byte, _)) in self.text.char_indices().enumerate() {
-            let style = if show_styles { self.styles[index] } else { Style::default() };
+            let style = if show_styles {
+                self.styles[index]
+            } else {
+                Style::default()
+            };
             let next = (style, index < sent);
             if format != Some(next) {
                 if let Some(previous) = format {
@@ -107,22 +111,28 @@ impl TextBuffer for Document {
         let text = normalize(text);
         let index = char_index.0.min(self.styles.len());
         let count = self.text.insert_text(&text, CharIndex(index));
-        if let Some((_, styles)) = self.paste.take_if(|(plain, _)| plain.as_str() == text.as_ref()) {
+        if let Some((_, styles)) = self
+            .paste
+            .take_if(|(plain, _)| plain.as_str() == text.as_ref())
+        {
             self.styles.splice(index..index, styles);
         } else {
-            let inherited = index.checked_sub(1)
+            let inherited = index
+                .checked_sub(1)
                 .and_then(|left| self.styles.get(left))
                 .filter(|style| self.styles.get(index) == Some(*style))
                 .copied()
                 .unwrap_or_default();
-            self.styles.splice(index..index, std::iter::repeat_n(inherited, count));
+            self.styles
+                .splice(index..index, std::iter::repeat_n(inherited, count));
         }
         count
     }
 
     fn delete_char_range(&mut self, range: Range<CharIndex>) {
         let len = self.styles.len();
-        self.styles.drain(range.start.0.min(len)..range.end.0.min(len));
+        self.styles
+            .drain(range.start.0.min(len)..range.end.0.min(len));
         self.text.delete_char_range(range);
     }
 
@@ -153,10 +163,16 @@ impl TokenSink for FragmentSink {
 
     fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
         let Fragment { parents, visible } = &mut *self.0.borrow_mut();
-        let (mut style, hidden) = parents.last().map_or((Style::default(), false), |p| (p.1, p.2));
+        let (mut style, hidden) = parents
+            .last()
+            .map_or((Style::default(), false), |p| (p.1, p.2));
         match token {
             CharacterTokens(text) if !hidden => {
-                visible.extend(text.chars().filter(|ch| !ch.is_whitespace()).map(|ch| (ch, style)));
+                visible.extend(
+                    text.chars()
+                        .filter(|ch| !ch.is_whitespace())
+                        .map(|ch| (ch, style)),
+                );
             }
             TagToken(tag) if tag.kind == StartTag => {
                 let name = tag.name.as_ref();
@@ -164,8 +180,15 @@ impl TokenSink for FragmentSink {
                 style.italic |= matches!(name, "i" | "em");
                 if let Some(attribute) = tag.attrs.iter().find(|a| &*a.name.local == "style") {
                     for declaration in attribute.value.split(';') {
-                        let Some((key, value)) = declaration.split_once(':') else { continue };
-                        let value = value.split('!').next().unwrap_or_default().trim().to_ascii_lowercase();
+                        let Some((key, value)) = declaration.split_once(':') else {
+                            continue;
+                        };
+                        let value = value
+                            .split('!')
+                            .next()
+                            .unwrap_or_default()
+                            .trim()
+                            .to_ascii_lowercase();
                         match key.trim().to_ascii_lowercase().as_str() {
                             "font-weight" => match value.as_str() {
                                 "bold" | "bolder" => style.bold = true,
@@ -187,10 +210,25 @@ impl TokenSink for FragmentSink {
                         }
                     }
                 }
-                if !tag.self_closing && !matches!(
-                    name, "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input"
-                        | "link" | "meta" | "param" | "source" | "track" | "wbr"
-                ) {
+                if !tag.self_closing
+                    && !matches!(
+                        name,
+                        "area"
+                            | "base"
+                            | "br"
+                            | "col"
+                            | "embed"
+                            | "hr"
+                            | "img"
+                            | "input"
+                            | "link"
+                            | "meta"
+                            | "param"
+                            | "source"
+                            | "track"
+                            | "wbr"
+                    )
+                {
                     let hidden = hidden || matches!(name, "head" | "script" | "style" | "template");
                     parents.push((tag.name, style, hidden));
                 }
@@ -242,9 +280,27 @@ mod tests {
         doc.prepare_paste(text, html);
         doc.insert_text(text, CharIndex(6));
         assert_eq!(doc.as_str(), "first Café bold & both\nitalic end");
-        assert_eq!(doc.styles()[11], Style { bold: true, italic: false });
-        assert_eq!(doc.styles()[18], Style { bold: true, italic: true });
-        assert_eq!(doc.styles()[23], Style { bold: false, italic: true });
+        assert_eq!(
+            doc.styles()[11],
+            Style {
+                bold: true,
+                italic: false
+            }
+        );
+        assert_eq!(
+            doc.styles()[18],
+            Style {
+                bold: true,
+                italic: true
+            }
+        );
+        assert_eq!(
+            doc.styles()[23],
+            Style {
+                bold: false,
+                italic: true
+            }
+        );
         doc.delete_char_range(CharIndex(6)..CharIndex(11));
         assert!(doc.styles()[6].bold);
         assert_eq!(doc.styles().len(), doc.chars().count());

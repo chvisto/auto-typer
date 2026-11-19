@@ -21,8 +21,8 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-            MOD_NOREPEAT, RegisterHotKey, SendInput, UnregisterHotKey, VK_B, VK_CONTROL,
-            VK_ESCAPE, VK_I, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+            MOD_NOREPEAT, RegisterHotKey, SendInput, UnregisterHotKey, VK_B, VK_CONTROL, VK_ESCAPE,
+            VK_I, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
         },
         WindowsAndMessaging::{
             GetForegroundWindow, GetWindowThreadProcessId, IsWindow, MSG, MWMO_INPUTAVAILABLE,
@@ -493,8 +493,8 @@ impl AutoTyper {
         {
             return Err("The text contains an unsupported control character.".into());
         }
-        let styles = (!self.plain_text && self.text.has_styles())
-            .then(|| self.text.styles().to_vec());
+        let styles =
+            (!self.plain_text && self.text.has_styles()).then(|| self.text.styles().to_vec());
         let timing = self.options.timing(Local::now())?;
         let countdown = Duration::from_secs(u64::from(self.options.countdown));
         let events =
@@ -556,10 +556,16 @@ impl AutoTyper {
 impl eframe::App for AutoTyper {
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         self.text.clear_pending_paste();
-        if self.active.is_none() && self.capture.is_none() && !self.reading
+        if self.active.is_none()
+            && self.capture.is_none()
+            && !self.reading
             && ctx.memory(|memory| memory.has_focus(egui::Id::unique(TEXT_EDITOR)))
             && let Some(plain) = input.events.iter().find_map(|event| {
-                if let egui::Event::Paste(text) = event { Some(text.as_str()) } else { None }
+                if let egui::Event::Paste(text) = event {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
             })
             && let Ok(mut clipboard) = arboard::Clipboard::new()
             && let Ok(html) = clipboard.get().html()
@@ -1349,7 +1355,10 @@ fn change_style(target: HWND, previous: Style, next: Style) -> Result<(), String
     };
     let mut inputs = Vec::with_capacity(6);
     inputs.push(key_input(VK_CONTROL, false));
-    for (key, changed) in [(VK_B, previous.bold != next.bold), (VK_I, previous.italic != next.italic)] {
+    for (key, changed) in [
+        (VK_B, previous.bold != next.bold),
+        (VK_I, previous.italic != next.italic),
+    ] {
         if changed {
             inputs.push(key_input(key, false));
             inputs.push(key_input(key, true));
@@ -1364,11 +1373,27 @@ fn change_style(target: HWND, previous: Style, next: Style) -> Result<(), String
     if some_key_held || foreground_window() != target {
         return Err("Formatting stopped because the target or keyboard state changed.".into());
     }
-    let sent = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
     if sent != inputs.len() as u32 {
         if sent > 0 {
-            let releases = [key_input(VK_B, true), key_input(VK_I, true), key_input(VK_CONTROL, true)];
-            unsafe { SendInput(releases.len() as u32, releases.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+            let releases = [
+                key_input(VK_B, true),
+                key_input(VK_I, true),
+                key_input(VK_CONTROL, true),
+            ];
+            unsafe {
+                SendInput(
+                    releases.len() as u32,
+                    releases.as_ptr(),
+                    std::mem::size_of::<INPUT>() as i32,
+                )
+            };
         }
         return Err("Windows could not send the formatting shortcut.".into());
     }
@@ -1395,7 +1420,11 @@ mod tests {
                         let ctx = egui::Context::default();
                         set_typography(&ctx);
                         let mut app = AutoTyper::default();
-                        egui::TextBuffer::insert_text(&mut app.text, &text, egui::text::CharIndex(0));
+                        egui::TextBuffer::insert_text(
+                            &mut app.text,
+                            &text,
+                            egui::text::CharIndex(0),
+                        );
                         app.options.mode = mode;
                         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size.into());
                         let mut input = egui::RawInput {

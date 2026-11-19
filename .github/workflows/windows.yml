@@ -17,31 +17,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: build_cache
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             target/release
           key: windows-x64-release-${{ hashFiles('Cargo.toml', '.cargo/config.toml') }}
-          restore-keys: windows-x64-release-
-      - name: Report Windows build start
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-          gh api "repos/$env:GITHUB_REPOSITORY/statuses/$env:GITHUB_SHA" -f "state=pending" -f "context=AutoTyper / Windows release" -f "target_url=$runUrl" --silent
-      - run: cargo +stable fmt --all
-      - run: cargo +stable test --release
+      - run: cargo +stable fmt --all --check
+      - run: cargo +stable test --release --locked
       - run: cargo +stable build --release --locked
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: formatted-source
-          path: |
-            Cargo.lock
-            src/main.rs
-            src/rich_text.rs
-          if-no-files-found: error
       - name: Verify GUI executable
         run: |
           $binary = [IO.File]::ReadAllBytes("target/release/auto-typer.exe")
@@ -64,10 +48,3 @@ jobs:
           $state = if ($env:BUILD_RESULT -in @("success", "failure")) { $env:BUILD_RESULT } else { "error" }
           $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           gh api "repos/$env:GITHUB_REPOSITORY/statuses/$env:GITHUB_SHA" -f "state=$state" -f "context=AutoTyper / Windows release" -f "target_url=$runUrl" --silent
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: always() && steps.build_cache.outputs.cache-hit != 'true'
-        with:
-          path: |
-            ~/.cargo/registry
-            target/release
-          key: ${{ steps.build_cache.outputs.cache-primary-key }}
