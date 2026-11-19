@@ -733,7 +733,7 @@ impl AutoTyper {
             });
             label.id
         });
-        let text_height = (ui.available_height() - 118.0).max(48.0);
+        let text_height = (ui.available_height() - 60.0).max(48.0);
         ui.add_enabled_ui(enabled, |ui| {
             let frame = egui::Frame::new()
                 .fill(SURFACE)
@@ -768,12 +768,15 @@ impl AutoTyper {
             if frame.inner.has_focus() {
                 ui.painter().rect_stroke(frame.response.rect, 9, Stroke::new(1.0, MUTED), egui::StrokeKind::Inside);
             }
-            timing_fields(ui, &mut self.options);
         });
     }
 
     fn actions(&mut self, ui: &mut egui::Ui) {
-        if self.reading && self.timing_open {
+        if !self.reading {
+            let ready = self.active.is_none() && self.capture.is_none();
+            ui.add_enabled_ui(ready, |ui| timing_fields(ui, &mut self.options));
+            ui.separator();
+        } else if self.timing_open {
             timing_fields(ui, &mut self.options);
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Apply timing").clicked() {
@@ -1249,6 +1252,7 @@ mod tests {
                         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size.into());
                         let mut input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
                         input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().native_pixels_per_point = Some(scale);
+                        ctx.run_ui(input.clone(), |ui| app.show(ui));
                         let output = ctx.run_ui(input, |ui| app.show(ui));
                         for label in ["Timing", "Pauses    Periods · 5.0 s", "Countdown", "Start typing"] {
                             assert!(output.shapes.iter().any(|clipped| {
