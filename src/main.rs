@@ -269,6 +269,17 @@ fn word_spans(text: &[char]) -> impl Iterator<Item = std::ops::Range<usize>> + '
     })
 }
 
+fn shape_burst(steps: &mut [NaturalStep], pace: f64) {
+    let last = steps.len().saturating_sub(1);
+    let pickup = (steps.len() / 4).clamp(1, 7) as f64;
+    let taper = (steps.len() / 5).clamp(1, 6) as f64;
+    for (index, step) in steps.iter_mut().enumerate() {
+        let launch = (1.0 - index as f64 / pickup).max(0.0).powi(2);
+        let settle = (1.0 - (last - index) as f64 / taper).max(0.0).powi(2);
+        step.weight_offset += pace + 0.62 * launch + 0.32 * settle;
+    }
+}
+
 fn natural_cadence(text: &[char], mut sample: impl FnMut() -> f64) -> Vec<NaturalStep> {
     let word_key = |span: std::ops::Range<usize>| {
         text[span]
@@ -284,6 +295,8 @@ fn natural_cadence(text: &[char], mut sample: impl FnMut() -> f64) -> Vec<Natura
     let mut steps = vec![NaturalStep::default(); text.len()];
     let mut previous: Option<(usize, String)> = None;
     let mut words_in_burst = 0usize;
+    let mut burst_start = 0;
+    let mut burst_target = 4 + (sample() * 5.0) as usize;
     let mut burst_weight = 0.0;
     for span in word_spans(text) {
         let key = word_key(span.clone());
@@ -293,7 +306,7 @@ fn natural_cadence(text: &[char], mut sample: impl FnMut() -> f64) -> Vec<Natura
         } else {
             0.0
         };
-        let complexity = (span.len().saturating_sub(7) as f64 * 0.032).min(0.28);
+        let complexity = (span.len().saturating_sub(7) as f64 * 0.04).min(0.33);
         let rare = 1.0 - familiarity;
         if let Some((end, previous_word)) = &previous {
             let separator = &text[*end..span.start];
@@ -321,22 +334,31 @@ fn natural_cadence(text: &[char], mut sample: impl FnMut() -> f64) -> Vec<Natura
                     key.as_str(),
                     "but" | "because" | "although" | "however" | "therefore" | "meanwhile"
                 );
-                let pressure = (words_in_burst.saturating_sub(3) as f64 * 0.045).min(0.34);
+                let joined_phrase = matches!(
+                    previous_word.as_str(),
+                    "a" | "an" | "the" | "to" | "of" | "and" | "or" | "in" | "for"
+                );
+                let pressure = (words_in_burst.saturating_sub(burst_target.saturating_sub(2))
+                    as f64 * 0.095).min(0.48);
                 let hesitation = 0.03
                     + pressure
                     + 0.06 * rare
                     + 0.36 * complexity
                     + if transition { 0.12 } else { 0.0 };
                 let seconds = match newlines {
-                    2.. => 0.55 + 1.45 * tail,
-                    1 => 0.32 + 0.98 * tail,
-                    _ if sentence => 0.22 + 1.14 * tail,
-                    _ if clause && words_in_burst >= 2 && chance < 0.72 => 0.10 + 0.62 * tail,
-                    _ if periods == 0 && words_in_burst >= 3 && chance < hesitation => {
+                    2.. => 0.85 + 1.15 * tail,
+                    1 => 0.48 + 0.92 * tail,
+                    _ if sentence => 0.42 + 1.30 * tail,
+                    _ if clause && words_in_burst >= 2 && chance < 0.82 => 0.16 + 0.60 * tail,
+                    _ if periods == 0
+                        && !joined_phrase
+                        && words_in_burst >= 3
+                        && (chance < hesitation || words_in_burst >= burst_target + 2) =>
+                    {
                         if draw > 0.94 {
-                            0.55 + 1.45 * ((draw - 0.94) / 0.06).powi(2)
+                            0.72 + 1.28 * ((draw - 0.94) / 0.06).powi(2)
                         } else {
-                            0.055 + 0.34 * tail + 0.5 * complexity
+                            0.14 + 0.44 * tail + 0.5 * complexity
                         }
                     }
                     _ => 0.0,
@@ -348,25 +370,26 @@ fn natural_cadence(text: &[char], mut sample: impl FnMut() -> f64) -> Vec<Natura
                     | (u8::from(separator.contains(&',')) << 1)
                     | (u8::from(newlines > 0) << 2);
                 if seconds > 0.0 {
+                    shape_burst(&mut steps[burst_start..span.start], burst_weight);
+                    burst_start = span.start;
                     words_in_burst = 0;
-                    burst_weight = (sample() - 0.5) * 0.18;
+                    burst_target = 4 + (sample() * 5.0) as usize;
+                    burst_weight = (sample() - 0.5) * 0.38;
                 }
             }
         }
-        let pickup = 0.14 * (1.0 - (words_in_burst as f64 / 3.0).min(1.0)).powi(2);
         for (letter, step) in steps[span.clone()].iter_mut().enumerate() {
             let ease_in = if complexity > 0.0 {
-                0.06 * 3usize.saturating_sub(letter) as f64 * (0.35 + 0.65 * rare)
+                0.08 * 3usize.saturating_sub(letter) as f64 * (0.35 + 0.65 * rare)
             } else {
                 0.0
             };
-            step.weight_offset = burst_weight + pickup - 0.08 * familiarity
-                + complexity * (0.45 + 0.55 * rare)
-                + ease_in;
+            step.weight_offset = -0.08 * familiarity + complexity * (0.45 + 0.55 * rare) + ease_in;
         }
         words_in_burst += 1;
         previous = Some((span.end, key));
     }
+    shape_burst(&mut steps[burst_start..], burst_weight);
     // Slow changes in rhythm should carry across neighboring keystrokes.
     let mut drift = 0.0;
     for step in &mut steps {
@@ -2088,6 +2111,18 @@ mod tests {
         assert_eq!(before(5), Duration::ZERO);
         let last = spans.last().unwrap();
         assert!(cadence[last.start].weight_offset > cadence[last.start + 4].weight_offset);
+
+        let start = Instant::now();
+        let timing = Timing {
+            pace: Pace::Wpm(65),
+            pauses: [Duration::ZERO; 3],
+            natural_writing: true,
+        };
+        let schedule = Schedule::plan(&text, &cadence, timing, start, start, SystemTime::UNIX_EPOCH, None).unwrap();
+        let interval = |index: usize| schedule.deadlines[index] - schedule.deadlines[index - 1];
+        let middle = interval(spans[1].start + 1);
+        assert!(schedule.deadlines[0] >= middle.mul_f64(1.35));
+        assert!(interval(spans[3].start - 1) >= middle.mul_f64(1.15));
     }
 
     #[test]
@@ -2097,7 +2132,16 @@ mod tests {
         let starts: Vec<_> = word_spans(&text).map(|span| span.start).collect();
         assert_eq!(cadence[starts[1] - 1].duration, Duration::ZERO);
         assert_eq!(cadence[starts[4] - 1].duration, Duration::ZERO);
-        assert!(cadence[starts[6] - 1].duration >= Duration::from_millis(220));
+        assert!(cadence[starts[6] - 1].duration >= Duration::from_millis(420));
+    }
+
+    #[test]
+    fn a_long_unpunctuated_passage_gets_a_break_even_without_an_early_hesitation() {
+        let text: Vec<_> = "notes ".repeat(18).chars().collect();
+        let cadence = natural_cadence(&text, || 0.999);
+        let breaks: Vec<_> = cadence.iter().filter(|step| !step.duration.is_zero()).collect();
+        assert_eq!(breaks.len(), 1);
+        assert!(breaks[0].duration >= Duration::from_millis(400));
     }
 
     #[test]
