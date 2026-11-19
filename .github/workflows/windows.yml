@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   build:
@@ -22,8 +23,8 @@ jobs:
             ~/.cargo/registry
             target/release
           key: windows-x64-release-${{ hashFiles('Cargo.toml', '.cargo/config.toml') }}
-      - run: cargo +stable fmt --all
-      - run: cargo +stable test --release
+      - run: cargo +stable fmt --all --check
+      - run: cargo +stable test --release --locked
       - run: cargo +stable build --release --locked
       - name: Verify GUI executable
         run: |
@@ -38,11 +39,12 @@ jobs:
           name: AutoTyper-windows-x64
           path: target/AutoTyper.exe
           if-no-files-found: error
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: build-sources
-          path: |
-            Cargo.lock
-            build.rs
-            src/main.rs
-          if-no-files-found: error
+      - name: Report Windows build status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RESULT: ${{ job.status }}
+        run: |
+          $state = if ($env:BUILD_RESULT -in @("success", "failure")) { $env:BUILD_RESULT } else { "error" }
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          gh api "repos/$env:GITHUB_REPOSITORY/statuses/$env:GITHUB_SHA" -f "state=$state" -f "context=AutoTyper / Windows release" -f "target_url=$runUrl" --silent

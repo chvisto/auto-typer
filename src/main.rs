@@ -64,8 +64,12 @@ fn main() -> eframe::Result {
             cc.egui_ctx.style_mut_of(egui::Theme::Dark, |style| {
                 style.spacing.item_spacing = egui::vec2(8.0, 6.0);
                 style.spacing.interact_size.y = 24.0;
-                style.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-                style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
+                style
+                    .text_styles
+                    .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+                style
+                    .text_styles
+                    .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
             });
             Ok(Box::new(AutoTyper::default()))
         }),
@@ -103,9 +107,18 @@ impl Default for Options {
             finish_at: String::new(),
             countdown: 4,
             pauses: [
-                Pause { enabled: true, seconds: 5.0 },
-                Pause { enabled: false, seconds: 0.5 },
-                Pause { enabled: false, seconds: 1.0 },
+                Pause {
+                    enabled: true,
+                    seconds: 5.0,
+                },
+                Pause {
+                    enabled: false,
+                    seconds: 0.5,
+                },
+                Pause {
+                    enabled: false,
+                    seconds: 1.0,
+                },
             ],
         }
     }
@@ -193,19 +206,28 @@ impl Schedule {
     ) -> Result<Self, String> {
         let count = remaining.len();
         let initial_pause = previous.map_or(Duration::ZERO, |(ch, sent_at)| {
-            timing.pause_after(ch).saturating_sub(now.saturating_duration_since(sent_at))
+            timing
+                .pause_after(ch)
+                .saturating_sub(now.saturating_duration_since(sent_at))
         });
         let available = match timing.pace {
             Pace::Wpm(_) => None,
-            Pace::Duration(total) => Some(total.saturating_sub(now.saturating_duration_since(started))),
+            Pace::Duration(total) => {
+                Some(total.saturating_sub(now.saturating_duration_since(started)))
+            }
             Pace::FinishAt(finish) => Some(finish.duration_since(wall_now).unwrap_or_default()),
         };
         let typing_budget = if let Some(available) = available {
             if available.is_zero() {
-                return Err("Set a finish time that leaves time to type after the countdown.".into());
+                return Err(
+                    "Set a finish time that leaves time to type after the countdown.".into(),
+                );
             }
-            let pauses = initial_pause + remaining[..count.saturating_sub(1)]
-                .iter().map(|&ch| timing.pause_after(ch)).sum::<Duration>();
+            let pauses = initial_pause
+                + remaining[..count.saturating_sub(1)]
+                    .iter()
+                    .map(|&ch| timing.pause_after(ch))
+                    .sum::<Duration>();
             if available <= pauses {
                 return Err(format!(
                     "The remaining pauses take {:.1} s. Set a later finish or shorten the pauses.",
@@ -227,12 +249,19 @@ impl Schedule {
         for (index, &ch) in remaining.iter().enumerate() {
             typing = match typing_budget {
                 Some(budget) => budget.mul_f64((index + 1) as f64 / count as f64),
-                None => typing + Duration::from_secs_f64(seconds_per_char * rand::random_range(0.8..=1.2)),
+                None => {
+                    typing
+                        + Duration::from_secs_f64(seconds_per_char * rand::random_range(0.8..=1.2))
+                }
             };
             deadlines.push(typing + pauses);
             pauses += timing.pause_after(ch);
         }
-        Ok(Self { from: now, wall_from: wall_now, deadlines })
+        Ok(Self {
+            from: now,
+            wall_from: wall_now,
+            deadlines,
+        })
     }
 
     fn next(&self, index: usize) -> Instant {
@@ -241,7 +270,9 @@ impl Schedule {
 
     fn clock_shifted(&self, now: Instant, wall_now: SystemTime) -> bool {
         let expected = self.wall_from + now.saturating_duration_since(self.from);
-        wall_now.duration_since(expected).unwrap_or_else(|error| error.duration())
+        wall_now
+            .duration_since(expected)
+            .unwrap_or_else(|error| error.duration())
             > Duration::from_millis(250)
     }
 }
@@ -280,34 +311,57 @@ enum Wait {
 
 impl Events {
     fn new() -> io::Result<Self> {
-        Ok(Self { stop: new_event(true)?, timing: new_event(false)? })
+        Ok(Self {
+            stop: new_event(true)?,
+            timing: new_event(false)?,
+        })
     }
 
     fn wait(&self, deadline: Instant) -> Result<Wait, String> {
         let handles = [self.stop.as_raw_handle(), self.timing.as_raw_handle()];
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let millis = remaining.as_nanos().div_ceil(1_000_000).min(u128::from(u32::MAX - 1)) as u32;
+            let millis = remaining
+                .as_nanos()
+                .div_ceil(1_000_000)
+                .min(u128::from(u32::MAX - 1)) as u32;
             // SAFETY: both handles remain owned for the entirety of the call.
             let result = unsafe {
-                MsgWaitForMultipleObjectsEx(2, handles.as_ptr(), millis, QS_HOTKEY, MWMO_INPUTAVAILABLE)
+                MsgWaitForMultipleObjectsEx(
+                    2,
+                    handles.as_ptr(),
+                    millis,
+                    QS_HOTKEY,
+                    MWMO_INPUTAVAILABLE,
+                )
             };
             match result {
                 WAIT_OBJECT_0 => return Ok(Wait::Stop),
                 WAIT_TIMEOUT if Instant::now() >= deadline => return Ok(Wait::Due),
                 WAIT_TIMEOUT => {}
-                WAIT_FAILED => return Err(format!("The typing timer failed. {}", io::Error::last_os_error())),
+                WAIT_FAILED => {
+                    return Err(format!(
+                        "The typing timer failed. {}",
+                        io::Error::last_os_error()
+                    ));
+                }
                 ready if ready == WAIT_OBJECT_0 + 1 => return Ok(Wait::Timing),
                 ready if ready == WAIT_OBJECT_0 + 2 => {
                     let mut msg = MSG::default();
                     // SAFETY: the message is a writable output on the hotkey's owning thread.
-                    if unsafe { PeekMessageW(&mut msg, ptr::null_mut(), WM_HOTKEY, WM_HOTKEY, PM_REMOVE) } != 0
+                    if unsafe {
+                        PeekMessageW(&mut msg, ptr::null_mut(), WM_HOTKEY, WM_HOTKEY, PM_REMOVE)
+                    } != 0
                         && msg.wParam == HOTKEY_ID as usize
                     {
                         return Ok(Wait::Stop);
                     }
                 }
-                _ => return Err("Windows returned an unexpected result from the typing timer.".into()),
+                _ => {
+                    return Err(
+                        "Windows returned an unexpected result from the typing timer.".into(),
+                    );
+                }
             }
         }
     }
@@ -364,12 +418,16 @@ impl AutoTyper {
         if text.is_empty() {
             return Err("Enter text to type.".into());
         }
-        if text.iter().any(|&ch| ch.is_control() && !matches!(ch, '\n' | '\t')) {
+        if text
+            .iter()
+            .any(|&ch| ch.is_control() && !matches!(ch, '\n' | '\t'))
+        {
             return Err("The text contains an unsupported control character.".into());
         }
         let timing = self.options.timing(Local::now())?;
         let countdown = Duration::from_secs(u64::from(self.options.countdown));
-        let events = Arc::new(Events::new().map_err(|error| format!("Could not start typing. {error}"))?);
+        let events =
+            Arc::new(Events::new().map_err(|error| format!("Could not start typing. {error}"))?);
         let worker_events = Arc::clone(&events);
         let (sender, updates) = mpsc::channel();
         let (changes, worker_changes) = mpsc::channel();
@@ -382,7 +440,14 @@ impl AutoTyper {
                     let _ = sender.send(update);
                     ctx.request_repaint();
                 };
-                let result = run_job(&text, timing, countdown, &worker_events, &worker_changes, &report);
+                let result = run_job(
+                    &text,
+                    timing,
+                    countdown,
+                    &worker_events,
+                    &worker_changes,
+                    &report,
+                );
                 report(Update::Status(match result {
                     Ok(true) => Status::Completed,
                     Ok(false) => Status::Stopped,
@@ -390,7 +455,11 @@ impl AutoTyper {
                 }));
             })
             .map_err(|error| format!("Could not start typing. {error}"))?;
-        self.active = Some(ActiveRun { events, changes, updates });
+        self.active = Some(ActiveRun {
+            events,
+            changes,
+            updates,
+        });
         self.applied_timing = Some(timing);
         self.timing_feedback = None;
         self.timing_open = false;
@@ -403,7 +472,9 @@ impl AutoTyper {
     fn apply_timing(&mut self) {
         let Some(run) = &self.active else { return };
         let result = self.options.timing(Local::now()).and_then(|timing| {
-            run.changes.send(timing).map_err(|_| "The run has ended.".to_owned())?;
+            run.changes
+                .send(timing)
+                .map_err(|_| "The run has ended.".to_owned())?;
             signal(&run.events.timing).map_err(|error| format!("Could not apply timing. {error}"))
         });
         self.timing_feedback = result.err().map(Err);
@@ -421,7 +492,9 @@ impl eframe::App for AutoTyper {
                             self.applied_timing = Some(timing);
                         }));
                     }
-                    Ok(Update::Status(status @ (Status::Completed | Status::Stopped | Status::Error(_)))) => {
+                    Ok(Update::Status(
+                        status @ (Status::Completed | Status::Stopped | Status::Error(_)),
+                    )) => {
                         self.status = status;
                         self.active = None;
                         self.timing_open = false;
@@ -447,25 +520,44 @@ impl eframe::App for AutoTyper {
                 }
             }
         }
-        if matches!(self.status, Status::Countdown(_)) {
-            ctx.request_repaint_after(Duration::from_millis(75));
-        } else if self.options.mode == TimingMode::FinishAt && (!self.reading || self.timing_open) {
-            ctx.request_repaint_after(Duration::from_millis(250));
+        if let Status::Countdown(end) = self.status {
+            let remaining = end.saturating_duration_since(Instant::now());
+            let until_next_second = Duration::from_nanos(u64::from(remaining.subsec_nanos()));
+            ctx.request_repaint_after(until_next_second.max(Duration::from_millis(16)));
+        } else if self.options.mode == TimingMode::FinishAt
+            && (!self.reading || self.timing_open)
+            && ctx.input(|input| input.viewport().focused == Some(true))
+        {
+            ctx.request_repaint_after(Duration::from_secs(1));
         }
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 1.0]
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::bottom("actions")
             .resizable(false)
-            .frame(egui::Frame::new().fill(BLACK).inner_margin(egui::Margin::symmetric(22, 12)))
+            .frame(
+                egui::Frame::new()
+                    .fill(BLACK)
+                    .inner_margin(egui::Margin::symmetric(22, 12)),
+            )
             .show(ui, |ui| self.actions(ui));
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BLACK).inner_margin(egui::Margin::symmetric(22, 12)))
+            .frame(
+                egui::Frame::new()
+                    .fill(BLACK)
+                    .inner_margin(egui::Margin::symmetric(22, 12)),
+            )
             .show(ui, |ui| {
                 if self.reading {
                     self.reading_view(ui);
                 } else {
-                    egui::ScrollArea::vertical().id_salt("setup").show(ui, |ui| self.editor(ui));
+                    egui::ScrollArea::vertical()
+                        .id_salt("setup")
+                        .show(ui, |ui| self.editor(ui));
                 }
             });
     }
@@ -477,36 +569,64 @@ impl AutoTyper {
         ui.horizontal(|ui| {
             ui.label(RichText::new("AutoTyper").size(28.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.checkbox(&mut self.always_on_top, "Always on Top").changed() {
-                    let level = if self.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+                if ui
+                    .checkbox(&mut self.always_on_top, "Always on Top")
+                    .changed()
+                {
+                    let level = if self.always_on_top {
+                        egui::WindowLevel::AlwaysOnTop
+                    } else {
+                        egui::WindowLevel::Normal
+                    };
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
                 }
             });
         });
         ui.add_space(10.0);
 
         ui.add_enabled_ui(enabled, |ui| {
-            let editor_label = ui.horizontal(|ui| {
-                let label = ui.label(RichText::new("Text to type").strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!(
-                        "{} characters  ·  {} words", self.text.chars().count(), self.text.split_whitespace().count()
-                    )).weak().size(12.0));
-                });
-                label.id
-            }).inner;
-            egui::Frame::new().stroke(Stroke::new(1.0, BORDER))
-                .inner_margin(egui::Margin::symmetric(10, 6)).corner_radius(8)
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical().id_salt("editor").max_height(123.0).show(ui, |ui| {
-                        if ui.add(egui::TextEdit::multiline(&mut self.text)
-                            .desired_rows(7).desired_width(f32::INFINITY)
-                            .hint_text("Paste a paragraph or type here").frame(egui::Frame::new()))
-                            .labelled_by(editor_label).changed() && self.text.contains('\r')
-                        {
-                            self.text = self.text.replace("\r\n", "\n").replace('\r', "\n");
-                        }
+            let editor_label = ui
+                .horizontal(|ui| {
+                    let label = ui.label(RichText::new("Text to type").strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} characters  ·  {} words",
+                                self.text.chars().count(),
+                                self.text.split_whitespace().count()
+                            ))
+                            .weak()
+                            .size(12.0),
+                        );
                     });
+                    label.id
+                })
+                .inner;
+            egui::Frame::new()
+                .stroke(Stroke::new(1.0, BORDER))
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .corner_radius(8)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("editor")
+                        .max_height(123.0)
+                        .show(ui, |ui| {
+                            if ui
+                                .add(
+                                    egui::TextEdit::multiline(&mut self.text)
+                                        .desired_rows(7)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("Paste a paragraph or type here")
+                                        .frame(egui::Frame::new()),
+                                )
+                                .labelled_by(editor_label)
+                                .changed()
+                                && self.text.contains('\r')
+                            {
+                                self.text = self.text.replace("\r\n", "\n").replace('\r', "\n");
+                            }
+                        });
                 });
             ui.add_space(10.0);
             timing_fields(ui, &mut self.options);
@@ -514,8 +634,12 @@ impl AutoTyper {
             ui.separator();
             ui.horizontal(|ui| {
                 let label = ui.label("Start countdown");
-                ui.add(egui::DragValue::new(&mut self.options.countdown).range(1..=60).suffix(" s"))
-                    .labelled_by(label.id);
+                ui.add(
+                    egui::DragValue::new(&mut self.options.countdown)
+                        .range(1..=60)
+                        .suffix(" s"),
+                )
+                .labelled_by(label.id);
             });
         });
     }
@@ -524,17 +648,24 @@ impl AutoTyper {
         ui.set_min_width(ui.available_width());
         ui.separator();
         if self.reading && self.timing_open {
-            egui::ScrollArea::vertical().id_salt("live-timing").max_height(215.0).show(ui, |ui| {
-                timing_fields(ui, &mut self.options);
-                if ui.button("Apply timing").clicked() {
-                    self.apply_timing();
-                }
-                match &self.timing_feedback {
-                    Some(Ok(())) => { ui.label(RichText::new("Timing updated").weak()); }
-                    Some(Err(message)) => { ui.label(message); }
-                    None => {}
-                }
-            });
+            egui::ScrollArea::vertical()
+                .id_salt("live-timing")
+                .max_height(215.0)
+                .show(ui, |ui| {
+                    timing_fields(ui, &mut self.options);
+                    if ui.button("Apply timing").clicked() {
+                        self.apply_timing();
+                    }
+                    match &self.timing_feedback {
+                        Some(Ok(())) => {
+                            ui.label(RichText::new("Timing updated").weak());
+                        }
+                        Some(Err(message)) => {
+                            ui.label(message);
+                        }
+                        None => {}
+                    }
+                });
             ui.separator();
         }
 
@@ -543,7 +674,9 @@ impl AutoTyper {
             Status::Starting => Some("Starting…".to_owned()),
             Status::Countdown(end) => Some(format!(
                 "Click your target field · {:.0} s",
-                end.saturating_duration_since(Instant::now()).as_secs_f64().ceil()
+                end.saturating_duration_since(Instant::now())
+                    .as_secs_f64()
+                    .ceil()
             )),
             Status::FocusPaused => Some("Focus the original target to resume".to_owned()),
             Status::Stopping => Some("Stopping…".to_owned()),
@@ -563,7 +696,9 @@ impl AutoTyper {
                     self.status = Status::Ready;
                 }
             } else if running {
-                if ui.add_enabled(!matches!(self.status, Status::Stopping), primary("Stop")).clicked()
+                if ui
+                    .add_enabled(!matches!(self.status, Status::Stopping), primary("Stop"))
+                    .clicked()
                     && let Some(run) = &self.active
                 {
                     self.status = match signal(&run.events.stop) {
@@ -579,7 +714,9 @@ impl AutoTyper {
                 }
             } else {
                 let start = ui.add_enabled(!self.text.is_empty(), primary("Start typing"));
-                if start.clicked() && let Err(message) = self.start(ui.ctx()) {
+                if start.clicked()
+                    && let Err(message) = self.start(ui.ctx())
+                {
                     self.status = Status::Error(message);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -600,35 +737,66 @@ impl AutoTyper {
         ui.horizontal(|ui| {
             ui.label(RichText::new(heading).size(26.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(format!("{} / {} characters", self.sent, self.total)).monospace().weak().size(12.0));
+                ui.label(
+                    RichText::new(format!("{} / {} characters", self.sent, self.total))
+                        .monospace()
+                        .weak()
+                        .size(12.0),
+                );
             });
         });
-        if let Some(Timing { pace: Pace::FinishAt(finish), .. }) = self.applied_timing {
+        if let Some(Timing {
+            pace: Pace::FinishAt(finish),
+            ..
+        }) = self.applied_timing
+        {
             let finish: DateTime<Local> = finish.into();
-            ui.label(RichText::new(format!("Finish by {}", finish.format("%a %H:%M:%S"))).weak().size(12.0));
+            ui.label(
+                RichText::new(format!("Finish by {}", finish.format("%a %H:%M:%S")))
+                    .weak()
+                    .size(12.0),
+            );
         }
-        ui.add(egui::ProgressBar::new(self.sent as f32 / self.total as f32).desired_height(3.0).fill(WHITE));
+        ui.add(
+            egui::ProgressBar::new(self.sent as f32 / self.total as f32)
+                .desired_height(3.0)
+                .fill(WHITE),
+        );
         ui.add_space(13.0);
 
-        egui::ScrollArea::vertical().id_salt("paragraph").show(ui, |ui| {
-            let split = self.text.char_indices().nth(self.sent).map_or(self.text.len(), |(byte, _)| byte);
-            let mut paragraph = egui::text::LayoutJob::default();
-            for (part, color) in [(&self.text[..split], WHITE), (&self.text[split..], MUTED)] {
-                if !part.is_empty() {
-                    paragraph.append(part, 0.0, egui::TextFormat {
-                        font_id: egui::FontId::proportional(19.0), color, line_height: Some(29.0),
-                        ..Default::default()
-                    });
+        egui::ScrollArea::vertical()
+            .id_salt("paragraph")
+            .show(ui, |ui| {
+                let split = self
+                    .text
+                    .char_indices()
+                    .nth(self.sent)
+                    .map_or(self.text.len(), |(byte, _)| byte);
+                let mut paragraph = egui::text::LayoutJob::default();
+                for (part, color) in [(&self.text[..split], WHITE), (&self.text[split..], MUTED)] {
+                    if !part.is_empty() {
+                        paragraph.append(
+                            part,
+                            0.0,
+                            egui::TextFormat {
+                                font_id: egui::FontId::proportional(19.0),
+                                color,
+                                line_height: Some(29.0),
+                                ..Default::default()
+                            },
+                        );
+                    }
                 }
-            }
-            ui.add(egui::Label::new(paragraph).wrap());
-        });
+                ui.add(egui::Label::new(paragraph).wrap());
+            });
     }
 }
 
 fn primary(label: &str) -> egui::Button<'_> {
     egui::Button::new(RichText::new(label).strong().color(BLACK))
-        .fill(WHITE).min_size(egui::vec2(114.0, 36.0)).corner_radius(7)
+        .fill(WHITE)
+        .min_size(egui::vec2(114.0, 36.0))
+        .corner_radius(7)
 }
 
 fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
@@ -641,24 +809,43 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
         TimingMode::Wpm => {
             ui.horizontal(|ui| {
                 let label = ui.label("Typing speed");
-                ui.add(egui::DragValue::new(&mut options.wpm).range(1..=600).suffix(" WPM")).labelled_by(label.id);
+                ui.add(
+                    egui::DragValue::new(&mut options.wpm)
+                        .range(1..=600)
+                        .suffix(" WPM"),
+                )
+                .labelled_by(label.id);
             });
         }
         TimingMode::Duration => {
             ui.horizontal(|ui| {
                 let label = ui.label("Time after countdown");
-                ui.add(egui::DragValue::new(&mut options.total_seconds)
-                    .range(0.1..=86_400.0).speed(0.1).fixed_decimals(1).suffix(" s")).labelled_by(label.id);
+                ui.add(
+                    egui::DragValue::new(&mut options.total_seconds)
+                        .range(0.1..=86_400.0)
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" s"),
+                )
+                .labelled_by(label.id);
             });
         }
         TimingMode::FinishAt => {
             let now = Local::now();
             ui.horizontal_wrapped(|ui| {
                 let label = ui.label("Finish by");
-                ui.add(egui::TextEdit::singleline(&mut options.finish_at)
-                    .desired_width(90.0).font(egui::TextStyle::Monospace).hint_text("HH:MM:SS"))
-                    .labelled_by(label.id);
-                ui.label(RichText::new(format!("PC clock {}", now.format("%H:%M:%S"))).weak().size(12.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut options.finish_at)
+                        .desired_width(90.0)
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text("HH:MM:SS"),
+                )
+                .labelled_by(label.id);
+                ui.label(
+                    RichText::new(format!("PC clock {}", now.format("%H:%M:%S")))
+                        .weak()
+                        .size(12.0),
+                );
             });
             if !options.finish_at.trim().is_empty() {
                 let message = match next_finish(&options.finish_at, now) {
@@ -670,14 +857,27 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
         }
     }
     ui.add_space(4.0);
-    egui::Grid::new("punctuation").spacing([14.0, 3.0]).show(ui, |ui| {
-        for (pause, label) in options.pauses.iter_mut().zip(["Pause at periods", "Pause at commas", "Pause at new lines"]) {
-            let checkbox = ui.checkbox(&mut pause.enabled, label);
-            ui.add_enabled(pause.enabled, egui::DragValue::new(&mut pause.seconds)
-                .range(0.0..=600.0).speed(0.1).fixed_decimals(1).suffix(" s")).labelled_by(checkbox.id);
-            ui.end_row();
-        }
-    });
+    egui::Grid::new("punctuation")
+        .spacing([14.0, 3.0])
+        .show(ui, |ui| {
+            for (pause, label) in options.pauses.iter_mut().zip([
+                "Pause at periods",
+                "Pause at commas",
+                "Pause at new lines",
+            ]) {
+                let checkbox = ui.checkbox(&mut pause.enabled, label);
+                ui.add_enabled(
+                    pause.enabled,
+                    egui::DragValue::new(&mut pause.seconds)
+                        .range(0.0..=600.0)
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" s"),
+                )
+                .labelled_by(checkbox.id);
+                ui.end_row();
+            }
+        });
 }
 
 struct EscapeHotkey;
@@ -685,8 +885,13 @@ struct EscapeHotkey;
 impl EscapeHotkey {
     fn register() -> Result<Self, String> {
         // SAFETY: the null window handle registers Esc on this worker's message queue.
-        if unsafe { RegisterHotKey(ptr::null_mut(), HOTKEY_ID, MOD_NOREPEAT, VK_ESCAPE.into()) } == 0 {
-            return Err(format!("Could not register Esc. {}", io::Error::last_os_error()));
+        if unsafe { RegisterHotKey(ptr::null_mut(), HOTKEY_ID, MOD_NOREPEAT, VK_ESCAPE.into()) }
+            == 0
+        {
+            return Err(format!(
+                "Could not register Esc. {}",
+                io::Error::last_os_error()
+            ));
         }
         Ok(Self)
     }
@@ -711,7 +916,14 @@ fn run_job(
     let mut enigo = Enigo::new(&Settings::default())
         .map_err(|error| format!("Could not initialize keyboard input. {error}"))?;
     let started = Instant::now() + countdown;
-    let mut schedule = Schedule::plan(text, timing, started, started, SystemTime::now() + countdown, None)?;
+    let mut schedule = Schedule::plan(
+        text,
+        timing,
+        started,
+        started,
+        SystemTime::now() + countdown,
+        None,
+    )?;
     report(Update::Status(Status::Countdown(started)));
     if events.wait(started)? == Wait::Stop {
         return Ok(false);
@@ -728,7 +940,14 @@ fn run_job(
     }
 
     if matches!(timing.pace, Pace::FinishAt(_)) {
-        schedule = Schedule::plan(text, timing, started, Instant::now(), SystemTime::now(), None)?;
+        schedule = Schedule::plan(
+            text,
+            timing,
+            started,
+            Instant::now(),
+            SystemTime::now(),
+            None,
+        )?;
     }
 
     let mut sent = 0;
@@ -739,12 +958,23 @@ fn run_job(
     while sent < text.len() {
         let due = schedule.next(next);
         let check_focus = Instant::now() + Duration::from_millis(125);
-        let deadline = if focus_paused { check_focus } else { due.min(check_focus) };
+        let deadline = if focus_paused {
+            check_focus
+        } else {
+            due.min(check_focus)
+        };
         match events.wait(deadline)? {
             Wait::Stop => return Ok(false),
             Wait::Timing => {
                 if let Some(requested) = changes.try_iter().last() {
-                    match Schedule::plan(&text[sent..], requested, started, Instant::now(), SystemTime::now(), previous) {
+                    match Schedule::plan(
+                        &text[sent..],
+                        requested,
+                        started,
+                        Instant::now(),
+                        SystemTime::now(),
+                        previous,
+                    ) {
                         Ok(updated) => {
                             schedule = updated;
                             timing = requested;
@@ -772,7 +1002,9 @@ fn run_job(
         }
         let now = Instant::now();
         let wall_now = SystemTime::now();
-        if focus_paused || (matches!(timing.pace, Pace::FinishAt(_)) && schedule.clock_shifted(now, wall_now)) {
+        if focus_paused
+            || (matches!(timing.pace, Pace::FinishAt(_)) && schedule.clock_shifted(now, wall_now))
+        {
             schedule = Schedule::plan(&text[sent..], timing, started, now, wall_now, previous)?;
             next = 0;
             if focus_paused {
@@ -812,7 +1044,14 @@ mod tests {
 
     fn planned(text: &str, timing: Timing) -> Result<Schedule, String> {
         let start = Instant::now();
-        Schedule::plan(&text.chars().collect::<Vec<_>>(), timing, start, start, SystemTime::UNIX_EPOCH, None)
+        Schedule::plan(
+            &text.chars().collect::<Vec<_>>(),
+            timing,
+            start,
+            start,
+            SystemTime::UNIX_EPOCH,
+            None,
+        )
     }
 
     #[test]
@@ -822,13 +1061,20 @@ mod tests {
             pauses: [5, 1, 2].map(Duration::from_secs),
         };
         let schedule = planned("é.,\nx.", timing).unwrap();
-        let deadlines: Vec<_> = schedule.deadlines.iter().map(Duration::as_secs_f64).collect();
+        let deadlines: Vec<_> = schedule
+            .deadlines
+            .iter()
+            .map(Duration::as_secs_f64)
+            .collect();
         assert_eq!(deadlines, [2.0, 4.0, 11.0, 14.0, 18.0, 20.0]);
     }
 
     #[test]
     fn duration_rejects_pauses_without_time_to_type() {
-        let timing = Timing { pace: Pace::Duration(Duration::from_secs(5)), pauses: [5, 0, 0].map(Duration::from_secs) };
+        let timing = Timing {
+            pace: Pace::Duration(Duration::from_secs(5)),
+            pauses: [5, 0, 0].map(Duration::from_secs),
+        };
         assert!(planned("One. Two.", timing).is_err());
     }
 
@@ -836,8 +1082,19 @@ mod tests {
     fn timing_changes_preserve_the_original_start_and_remaining_punctuation_pause() {
         let started = Instant::now();
         let now = started + Duration::from_secs(6);
-        let timing = Timing { pace: Pace::Duration(Duration::from_secs(10)), pauses: [3, 0, 0].map(Duration::from_secs) };
-        let schedule = Schedule::plan(&['a', 'b'], timing, started, now, SystemTime::UNIX_EPOCH, Some(('.', now - Duration::from_secs(1)))).unwrap();
+        let timing = Timing {
+            pace: Pace::Duration(Duration::from_secs(10)),
+            pauses: [3, 0, 0].map(Duration::from_secs),
+        };
+        let schedule = Schedule::plan(
+            &['a', 'b'],
+            timing,
+            started,
+            now,
+            SystemTime::UNIX_EPOCH,
+            Some(('.', now - Duration::from_secs(1))),
+        )
+        .unwrap();
         assert_eq!(schedule.deadlines, [3, 4].map(Duration::from_secs));
     }
 
@@ -851,11 +1108,20 @@ mod tests {
 
         let wall_now: SystemTime = now.into();
         let started = Instant::now();
-        let timing = Timing { pace: Pace::FinishAt(finish.into()), pauses: [Duration::ZERO; 3] };
+        let timing = Timing {
+            pace: Pace::FinishAt(finish.into()),
+            pauses: [Duration::ZERO; 3],
+        };
         let schedule = Schedule::plan(&['a'], timing, started, started, wall_now, None).unwrap();
         assert_eq!(schedule.deadlines, [Duration::from_secs(30)]);
-        assert!(!schedule.clock_shifted(started + Duration::from_secs(1), wall_now + Duration::from_secs(1)));
-        assert!(schedule.clock_shifted(started + Duration::from_secs(1), wall_now + Duration::from_secs(2)));
+        assert!(!schedule.clock_shifted(
+            started + Duration::from_secs(1),
+            wall_now + Duration::from_secs(1)
+        ));
+        assert!(schedule.clock_shifted(
+            started + Duration::from_secs(1),
+            wall_now + Duration::from_secs(2)
+        ));
     }
 
     #[test]
@@ -875,8 +1141,18 @@ mod tests {
     fn stop_interrupts_a_future_deadline() {
         let events = Events::new().unwrap();
         signal(&events.timing).unwrap();
-        assert_eq!(events.wait(Instant::now() + Duration::from_secs(2)).unwrap(), Wait::Timing);
+        assert_eq!(
+            events
+                .wait(Instant::now() + Duration::from_secs(2))
+                .unwrap(),
+            Wait::Timing
+        );
         signal(&events.stop).unwrap();
-        assert_eq!(events.wait(Instant::now() + Duration::from_secs(2)).unwrap(), Wait::Stop);
+        assert_eq!(
+            events
+                .wait(Instant::now() + Duration::from_secs(2))
+                .unwrap(),
+            Wait::Stop
+        );
     }
 }
