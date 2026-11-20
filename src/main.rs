@@ -1589,11 +1589,21 @@ fn customizations(ui: &mut egui::Ui, options: &mut Options) {
         let [minimum, maximum] = &mut options.thinking_seconds;
         compact_row(ui, 28.0, |ui| {
             let min = ui.label("Min");
-            ui.add(egui::DragValue::new(minimum).range(0.1..=*maximum).fixed_decimals(1).suffix(" s"))
-                .labelled_by(min.id);
+            ui.add(
+                egui::DragValue::new(minimum)
+                    .range(0.1..=*maximum)
+                    .fixed_decimals(1)
+                    .suffix(" s"),
+            )
+            .labelled_by(min.id);
             let max = ui.label("Max");
-            ui.add(egui::DragValue::new(maximum).range(*minimum..=600.0).fixed_decimals(1).suffix(" s"))
-                .labelled_by(max.id);
+            ui.add(
+                egui::DragValue::new(maximum)
+                    .range(*minimum..=600.0)
+                    .fixed_decimals(1)
+                    .suffix(" s"),
+            )
+            .labelled_by(max.id);
         });
     }
     if options.mode == TimingMode::Wpm {
@@ -1609,12 +1619,22 @@ fn customizations(ui: &mut egui::Ui, options: &mut Options) {
     ui.separator();
     ui.add_space(5.0);
     ui.label(emphasis("Punctuation pauses", 12.0).color(MUTED));
-    for (pause, label) in options.pauses.iter_mut().zip(["Periods", "Commas", "New lines"]) {
+    for (pause, label) in options
+        .pauses
+        .iter_mut()
+        .zip(["Periods", "Commas", "New lines"])
+    {
         setting_row(
             ui,
             label,
             &mut pause.enabled,
-            Some(egui::DragValue::new(&mut pause.seconds).range(0.0..=600.0).speed(0.1).fixed_decimals(1).suffix(" s")),
+            Some(
+                egui::DragValue::new(&mut pause.seconds)
+                    .range(0.0..=600.0)
+                    .speed(0.1)
+                    .fixed_decimals(1)
+                    .suffix(" s"),
+            ),
         );
     }
 }
@@ -1633,7 +1653,8 @@ fn setting_row(
                 ui.add_enabled(*enabled, value).labelled_by(label.id);
             }
             switch
-        }).inner
+        })
+        .inner
     })
 }
 
@@ -1643,7 +1664,14 @@ fn setting_switch(ui: &mut egui::Ui, caption: &str, enabled: &mut bool) -> egui:
         *enabled = !*enabled;
         response.mark_changed();
     }
-    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *enabled, caption));
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::Role::CheckBox,
+            ui.is_enabled(),
+            *enabled,
+            caption,
+        )
+    });
     let track = egui::Rect::from_center_size(rect.center(), egui::vec2(36.0, 20.0));
     let outline = if response.has_focus() || response.hovered() {
         WHITE
@@ -1659,7 +1687,8 @@ fn setting_switch(ui: &mut egui::Ui, caption: &str, enabled: &mut bool) -> egui:
     );
     let offset = if *enabled { 8.0 } else { -8.0 };
     let thumb = if *enabled { BLACK } else { MUTED };
-    ui.painter().circle_filled(track.center() + egui::vec2(offset, 0.0), 6.0, thumb);
+    ui.painter()
+        .circle_filled(track.center() + egui::vec2(offset, 0.0), 6.0, thumb);
     response
 }
 
@@ -2385,7 +2414,9 @@ mod tests {
         let mut enabled = false;
         let mut center = egui::Pos2::ZERO;
         ctx.run_ui(egui::RawInput::default(), |ui| {
-            center = setting_switch(ui, "Natural writing", &mut enabled).rect.center();
+            center = setting_switch(ui, "Natural writing", &mut enabled)
+                .rect
+                .center();
         });
         for pressed in [true, false] {
             let input = egui::RawInput {
