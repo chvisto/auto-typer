@@ -1042,6 +1042,7 @@ impl AutoTyper {
         if !self.reading && ui.available_width() >= 600.0 {
             egui::Panel::right("run controls")
                 .exact_size(264.0)
+                .resizable(false)
                 .show_separator_line(false)
                 .frame(egui::Frame::new().fill(BLACK).inner_margin(egui::Margin {
                     left: 0,
@@ -1236,21 +1237,24 @@ impl AutoTyper {
                 ui.add_space(5.0);
                 let ready = self.active.is_none() && self.capture.is_none();
                 ui.add_enabled_ui(ready, |ui| {
-                    compact_row(ui, 30.0, |ui| timing_modes(ui, &mut self.options));
-                    ui.add_space(12.0);
-                    pace_field(ui, &mut self.options, true);
-                    ui.add_space(12.0);
-                    ui.separator();
-                    ui.add_space(5.0);
+                    compact_row(ui, 34.0, |ui| timing_modes(ui, &mut self.options));
+                    ui.add_space(10.0);
+                    egui::Frame::new()
+                        .fill(CONTROL)
+                        .corner_radius(12)
+                        .inner_margin(12)
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            pace_field(ui, &mut self.options, true);
+                        });
+                    ui.add_space(8.0);
                     compact_row(ui, 32.0, |ui| {
                         let label = ui.label("Countdown");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             countdown_field(ui, &mut self.options.countdown).labelled_by(label.id);
                         });
                     });
-                    compact_row(ui, 32.0, |ui| {
-                        pause_settings(ui, &mut self.options);
-                    });
+                    customization_settings(ui, &mut self.options, true);
                 });
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                     if ready {
@@ -1434,10 +1438,10 @@ fn compact_row<R>(ui: &mut egui::Ui, height: f32, add: impl FnOnce(&mut egui::Ui
 }
 
 fn timing_fields(ui: &mut egui::Ui, options: &mut Options, show_countdown: bool) {
-    compact_row(ui, 32.0, |ui| {
+    compact_row(ui, 34.0, |ui| {
         timing_modes(ui, options);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            pause_settings(ui, options);
+            customization_settings(ui, options, false);
         });
     });
     compact_row(ui, 34.0, |ui| {
@@ -1453,25 +1457,32 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options, show_countdown: bool)
 }
 
 fn timing_modes(ui: &mut egui::Ui, options: &mut Options) {
-    ui.spacing_mut().item_spacing.x = 3.0;
-    for (mode, label) in [
-        (TimingMode::Wpm, "Pace"),
-        (TimingMode::Duration, "Duration"),
-        (TimingMode::FinishAt, "Finish by"),
-    ] {
-        let selected = options.mode == mode;
-        let mut button = egui::Button::selectable(
-            selected,
-            emphasis(label, 14.0).color(if selected { BLACK } else { MUTED }),
-        )
-        .corner_radius(14);
-        if selected {
-            button = button.fill(WHITE);
-        }
-        if ui.add(button).clicked() {
-            options.mode = mode;
-        }
-    }
+    egui::Frame::new()
+        .fill(BLACK)
+        .corner_radius(10)
+        .inner_margin(3)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (mode, label, width) in [
+                (TimingMode::Wpm, "Pace", 49.0),
+                (TimingMode::Duration, "Duration", 65.0),
+                (TimingMode::FinishAt, "Finish by", 68.0),
+            ] {
+                let selected = options.mode == mode;
+                let mut button = egui::Button::selectable(
+                    selected,
+                    emphasis(label, 13.0).color(if selected { BLACK } else { MUTED }),
+                )
+                .min_size(egui::vec2(width, 26.0))
+                .corner_radius(8);
+                if selected {
+                    button = button.fill(WHITE);
+                }
+                if ui.add(button).clicked() {
+                    options.mode = mode;
+                }
+            }
+        });
 }
 
 fn pace_field(ui: &mut egui::Ui, options: &mut Options, large: bool) {
@@ -1507,7 +1518,7 @@ fn pace_field(ui: &mut egui::Ui, options: &mut Options, large: bool) {
                 TimingMode::FinishAt => ui.add(
                     egui::TextEdit::singleline(&mut options.finish_at)
                         .desired_width(if large {
-                            ui.available_width() - 8.0
+                            ui.available_width() - 12.0
                         } else {
                             104.0
                         })
@@ -1546,62 +1557,110 @@ fn clock_hint(ui: &mut egui::Ui, options: &Options) {
     }
 }
 
-fn pause_settings(ui: &mut egui::Ui, options: &mut Options) {
-    let names = ["Periods", "Commas", "New lines"];
+fn customization_settings(ui: &mut egui::Ui, options: &mut Options, wide: bool) {
     let count = options.pauses.iter().filter(|pause| pause.enabled).count()
         + usize::from(options.natural_writing)
         + usize::from(options.natural_thinking)
         + usize::from(options.mode == TimingMode::Wpm && options.exhausted_typing);
-    let button = ui
-        .add(egui::Button::new(format!("Pauses  ·  {count}")).corner_radius(15))
-        .on_hover_text("Punctuation, natural writing, natural thinking and exhausted typing");
+    let summary = format!("{count} on");
+    let mut button = egui::Button::new(emphasis("Customizations", 14.0)).corner_radius(9);
+    if wide {
+        button = button
+            .min_size(egui::vec2(ui.available_width(), 36.0))
+            .right_text(RichText::new(&summary).size(12.0).color(MUTED));
+    }
+    let button = ui.add(button).on_hover_text(summary);
     egui::Popup::from_toggle_button_response(&button)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show(|ui| {
-            ui.set_width(232.0);
-            for (pause, label) in options.pauses.iter_mut().zip(names) {
-                compact_row(ui, 28.0, |ui| {
-                    let checkbox = ui.checkbox(&mut pause.enabled, label);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_enabled(
-                            pause.enabled,
-                            egui::DragValue::new(&mut pause.seconds)
-                                .range(0.0..=600.0)
-                                .speed(0.1)
-                                .fixed_decimals(1)
-                                .suffix(" s"),
-                        )
-                        .labelled_by(checkbox.id);
-                    });
-                });
-            }
-            ui.checkbox(&mut options.natural_writing, "Natural writing")
-                .on_hover_text("Types in bursts, pauses at thought breaks, and eases into longer words. WPM excludes pauses. Timed modes fit pauses into the remaining time.");
-            ui.checkbox(&mut options.natural_thinking, "Natural thinking")
-                .on_hover_text("Takes a random break every 6–12 seconds of typing. Timed modes take a break when the full wait fits.");
-            if options.natural_thinking {
-                let [minimum, maximum] = &mut options.thinking_seconds;
-                compact_row(ui, 28.0, |ui| {
-                    let min = ui.label("Min");
-                    ui.add(egui::DragValue::new(minimum).range(0.1..=*maximum).fixed_decimals(1).suffix(" s"))
-                        .labelled_by(min.id);
-                    let max = ui.label("Max");
-                    ui.add(egui::DragValue::new(maximum).range(*minimum..=600.0).fixed_decimals(1).suffix(" s"))
-                        .labelled_by(max.id);
-                });
-            }
-            if options.mode == TimingMode::Wpm {
-                compact_row(ui, 28.0, |ui| {
-                    let enabled = ui.checkbox(&mut options.exhausted_typing, "Exhausted typing")
-                        .on_hover_text("After a random stretch of typing, temporarily lowers WPM and lengthens enabled natural pauses. The percentage sets the speed reduction.");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_enabled(options.exhausted_typing,
-                            egui::DragValue::new(&mut options.exhaustion_reduction).range(1..=90).suffix("%"),
-                        ).labelled_by(enabled.id);
-                    });
-                });
-            }
+        .show(|ui| customizations(ui, options));
+}
+
+fn customizations(ui: &mut egui::Ui, options: &mut Options) {
+    ui.set_width(268.0);
+    ui.spacing_mut().item_spacing.y = 3.0;
+    ui.label(emphasis("Customizations", 20.0));
+    ui.add_space(8.0);
+    ui.label(emphasis("Typing rhythm", 12.0).color(MUTED));
+    setting_row(ui, "Natural writing", &mut options.natural_writing, None)
+        .on_hover_text("Types in bursts, pauses at thought breaks, and eases into longer words. WPM excludes pauses. Timed modes fit pauses into the remaining time.");
+    setting_row(ui, "Natural thinking", &mut options.natural_thinking, None)
+        .on_hover_text("Takes a random break every 6–12 seconds of typing. Timed modes take a break when the full wait fits.");
+    if options.natural_thinking {
+        let [minimum, maximum] = &mut options.thinking_seconds;
+        compact_row(ui, 28.0, |ui| {
+            let min = ui.label("Min");
+            ui.add(egui::DragValue::new(minimum).range(0.1..=*maximum).fixed_decimals(1).suffix(" s"))
+                .labelled_by(min.id);
+            let max = ui.label("Max");
+            ui.add(egui::DragValue::new(maximum).range(*minimum..=600.0).fixed_decimals(1).suffix(" s"))
+                .labelled_by(max.id);
         });
+    }
+    if options.mode == TimingMode::Wpm {
+        setting_row(
+            ui,
+            "Exhausted typing",
+            &mut options.exhausted_typing,
+            Some(egui::DragValue::new(&mut options.exhaustion_reduction).range(1..=90).suffix("%")),
+        )
+        .on_hover_text("After a random stretch of typing, temporarily lowers WPM and lengthens enabled natural pauses. The percentage sets the speed reduction.");
+    }
+    ui.add_space(5.0);
+    ui.separator();
+    ui.add_space(5.0);
+    ui.label(emphasis("Punctuation pauses", 12.0).color(MUTED));
+    for (pause, label) in options.pauses.iter_mut().zip(["Periods", "Commas", "New lines"]) {
+        setting_row(
+            ui,
+            label,
+            &mut pause.enabled,
+            Some(egui::DragValue::new(&mut pause.seconds).range(0.0..=600.0).speed(0.1).fixed_decimals(1).suffix(" s")),
+        );
+    }
+}
+
+fn setting_row(
+    ui: &mut egui::Ui,
+    caption: &str,
+    enabled: &mut bool,
+    value: Option<egui::DragValue<'_>>,
+) -> egui::Response {
+    compact_row(ui, 32.0, |ui| {
+        let label = ui.label(caption);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let switch = setting_switch(ui, caption, enabled);
+            if let Some(value) = value {
+                ui.add_enabled(*enabled, value).labelled_by(label.id);
+            }
+            switch
+        }).inner
+    })
+}
+
+fn setting_switch(ui: &mut egui::Ui, caption: &str, enabled: &mut bool) -> egui::Response {
+    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(44.0, 32.0), egui::Sense::click());
+    if response.clicked() {
+        *enabled = !*enabled;
+        response.mark_changed();
+    }
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *enabled, caption));
+    let track = egui::Rect::from_center_size(rect.center(), egui::vec2(36.0, 20.0));
+    let outline = if response.has_focus() || response.hovered() {
+        WHITE
+    } else {
+        Color32::from_gray(96)
+    };
+    ui.painter().rect(
+        track,
+        10,
+        if *enabled { WHITE } else { CONTROL },
+        Stroke::new(1.0, outline),
+        egui::StrokeKind::Outside,
+    );
+    let offset = if *enabled { 8.0 } else { -8.0 };
+    let thumb = if *enabled { BLACK } else { MUTED };
+    ui.painter().circle_filled(track.center() + egui::vec2(offset, 0.0), 6.0, thumb);
+    response
 }
 
 fn blurred_backdrop(source: &egui::ColorImage) -> egui::ColorImage {
@@ -2291,7 +2350,7 @@ mod tests {
                             "Pace",
                             "Duration",
                             "Finish by",
-                            "Pauses  ·  1",
+                            "Customizations",
                             "Countdown",
                             "Start typing",
                         ]
@@ -2317,6 +2376,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn customization_switch_toggles_with_a_click() {
+        let ctx = egui::Context::default();
+        set_theme(&ctx);
+        let mut enabled = false;
+        let mut center = egui::Pos2::ZERO;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            center = setting_switch(ui, "Natural writing", &mut enabled).rect.center();
+        });
+        for pressed in [true, false] {
+            let input = egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(center),
+                    egui::Event::PointerButton {
+                        pos: center,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                setting_switch(ui, "Natural writing", &mut enabled);
+            });
+        }
+        assert!(enabled);
     }
 
     #[test]
