@@ -15,7 +15,10 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::{docx, rich_text::{Document, Heading, Style, heading_kind, normalize}};
+use crate::{
+    docx,
+    rich_text::{Document, Heading, Style, heading_kind, normalize},
+};
 
 const IMPORT_LIMIT: u64 = 16 * 1024 * 1024;
 
@@ -47,7 +50,10 @@ pub fn choose(owner: HWND) -> Result<Option<PathBuf>, String> {
 }
 
 pub fn read(path: &Path) -> Result<Document, String> {
-    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default();
     if extension.eq_ignore_ascii_case("docx") {
         return docx::read(path);
     }
@@ -90,7 +96,9 @@ fn decode_text(bytes: &[u8]) -> Result<Document, String> {
         WINDOWS_1252.decode_without_bom_handling(bytes).0
     };
     if text.contains('\0') {
-        return Err("Choose a plain text file saved as UTF-8, UTF-16 with a BOM or Windows ANSI.".into());
+        return Err(
+            "Choose a plain text file saved as UTF-8, UTF-16 with a BOM or Windows ANSI.".into(),
+        );
     }
     let mut document = Document::default();
     document.push(&normalize(&text), Style::default());
@@ -105,18 +113,28 @@ fn append_legacy_blocks(document: &mut Document, blocks: &[rwml::Block], seen: &
                     document.push("\n", Style::default());
                 }
                 *seen = true;
-                let heading = paragraph.props.style_name.as_deref()
+                let heading = paragraph
+                    .props
+                    .style_name
+                    .as_deref()
                     .and_then(heading_kind)
-                    .or_else(|| paragraph.props.heading_level
-                        .filter(|level| (1..=9).contains(level))
-                        .map(Heading::Level))
+                    .or_else(|| {
+                        paragraph
+                            .props
+                            .heading_level
+                            .filter(|level| (1..=9).contains(level))
+                            .map(Heading::Level)
+                    })
                     .unwrap_or_default();
                 for run in paragraph.runs.iter().filter(|run| !run.props.hidden) {
-                    document.push(&normalize(&run.text), Style {
-                        bold: run.props.bold,
-                        italic: run.props.italic,
-                        heading,
-                    });
+                    document.push(
+                        &normalize(&run.text),
+                        Style {
+                            bold: run.props.bold,
+                            italic: run.props.italic,
+                            heading,
+                        },
+                    );
                 }
             }
             rwml::Block::Table(table) => {
@@ -136,7 +154,11 @@ mod tests {
     #[test]
     fn text_import_decodes_a_bom_and_normalizes_line_endings() {
         let mut bytes = vec![0xff, 0xfe];
-        bytes.extend("Café\r\nSecond line\rThird".encode_utf16().flat_map(u16::to_le_bytes));
+        bytes.extend(
+            "Café\r\nSecond line\rThird"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes),
+        );
         let document = decode_text(&bytes).unwrap();
         assert_eq!(&*document, "Café\nSecond line\nThird");
         assert!(!document.has_styles());

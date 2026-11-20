@@ -64,7 +64,12 @@ fn main() -> eframe::Result {
             let mut animate = 0i32;
             // SAFETY: this query writes a Win32 BOOL into the supplied buffer.
             let allowed = unsafe {
-                SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, ptr::from_mut(&mut animate).cast(), 0)
+                SystemParametersInfoW(
+                    SPI_GETCLIENTAREAANIMATION,
+                    0,
+                    ptr::from_mut(&mut animate).cast(),
+                    0,
+                )
             };
             Ok(Box::new(AutoTyper {
                 animate_drop: allowed != 0 && animate != 0,
@@ -1264,8 +1269,13 @@ impl AutoTyper {
     }
 
     fn drop_zone(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
-        let (focused, hovering, now) =
-            ui.input(|input| (input.focused, !input.raw.hovered_files.is_empty(), input.time));
+        let (focused, hovering, now) = ui.input(|input| {
+            (
+                input.focused,
+                !input.raw.hovered_files.is_empty(),
+                input.time,
+            )
+        });
         let mut brightness = 75;
         if self.animate_drop && focused && !hovering {
             if matches!(self.drop_pulse, DropPulse::Ready) {
@@ -1282,9 +1292,23 @@ impl AutoTyper {
                 }
             }
         }
-        let stroke = if hovering { WHITE } else { Color32::from_gray(brightness) };
-        let fill = if hovering { SURFACE } else { Color32::from_gray(12) };
-        ui.painter().rect(rect, 12, fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+        let stroke = if hovering {
+            WHITE
+        } else {
+            Color32::from_gray(brightness)
+        };
+        let fill = if hovering {
+            SURFACE
+        } else {
+            Color32::from_gray(12)
+        };
+        ui.painter().rect(
+            rect,
+            12,
+            fill,
+            Stroke::new(1.0, stroke),
+            egui::StrokeKind::Inside,
+        );
 
         let mut content = ui.new_child(
             egui::UiBuilder::new()
