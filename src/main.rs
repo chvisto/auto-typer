@@ -1461,8 +1461,7 @@ impl AutoTyper {
         content.add(egui::Label::new(emphasis("Drag and drop a file", 16.0)).selectable(false));
         for label in [".doc, .docx, .txt", "Ctrl + O to open"] {
             content.add(
-                egui::Label::new(RichText::new(label).size(12.0).color(MUTED))
-                    .selectable(false),
+                egui::Label::new(RichText::new(label).size(12.0).color(MUTED)).selectable(false),
             );
         }
     }
