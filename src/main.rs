@@ -1665,12 +1665,7 @@ fn setting_switch(ui: &mut egui::Ui, caption: &str, enabled: &mut bool) -> egui:
         response.mark_changed();
     }
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::Role::CheckBox,
-            ui.is_enabled(),
-            *enabled,
-            caption,
-        )
+        egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *enabled, caption)
     });
     let track = egui::Rect::from_center_size(rect.center(), egui::vec2(36.0, 20.0));
     let outline = if response.has_focus() || response.hovered() {
