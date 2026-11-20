@@ -1265,7 +1265,11 @@ impl AutoTyper {
 
     fn start_button(&mut self, ui: &mut egui::Ui) {
         let ready = !self.text.is_empty();
-        let (fill, ink) = if ready { (WHITE, BLACK) } else { (CONTROL, WHITE) };
+        let (fill, ink) = if ready {
+            (WHITE, BLACK)
+        } else {
+            (CONTROL, WHITE)
+        };
         let button = egui::Button::new(emphasis("Start typing", 16.0).color(ink))
             .right_text(RichText::new("Ctrl + Enter").size(11.0).color(ink))
             .fill(fill)
@@ -1459,7 +1463,8 @@ fn timing_modes(ui: &mut egui::Ui, options: &mut Options) {
         let mut button = egui::Button::selectable(
             selected,
             emphasis(label, 14.0).color(if selected { BLACK } else { MUTED }),
-        ).corner_radius(14);
+        )
+        .corner_radius(14);
         if selected {
             button = button.fill(WHITE);
         }
@@ -1476,36 +1481,46 @@ fn pace_field(ui: &mut egui::Ui, options: &mut Options, large: bool) {
         TimingMode::FinishAt => "Local time",
     };
     let label = ui.label(RichText::new(caption).weak());
-    let response = ui.scope(|ui| {
-        let font = egui::FontId::new(29.0, egui::FontFamily::Name(DISPLAY.into()));
-        if large {
-            let style = ui.style_mut();
-            style.text_styles.insert(style.drag_value_text_style.clone(), font.clone());
-            style.spacing.interact_size.y = 44.0;
-        }
-        match options.mode {
-            TimingMode::Wpm => ui.add(
-                egui::DragValue::new(&mut options.wpm).range(1..=600).suffix(" WPM"),
-            ),
-            TimingMode::Duration => ui.add(
-                egui::DragValue::new(&mut options.total_seconds)
-                    .range(0.1..=86_400.0)
-                    .speed(0.1)
-                    .fixed_decimals(1)
-                    .suffix(" s"),
-            ),
-            TimingMode::FinishAt => ui.add(
-                egui::TextEdit::singleline(&mut options.finish_at)
-                    .desired_width(if large { ui.available_width() - 8.0 } else { 104.0 })
-                    .font(if large {
-                        egui::FontSelection::FontId(font)
-                    } else {
-                        egui::FontSelection::Style(egui::TextStyle::Monospace)
-                    })
-                    .hint_text("HH:MM:SS"),
-            ),
-        }
-    }).inner;
+    let response = ui
+        .scope(|ui| {
+            let font = egui::FontId::new(29.0, egui::FontFamily::Name(DISPLAY.into()));
+            if large {
+                let style = ui.style_mut();
+                style
+                    .text_styles
+                    .insert(style.drag_value_text_style.clone(), font.clone());
+                style.spacing.interact_size.y = 44.0;
+            }
+            match options.mode {
+                TimingMode::Wpm => ui.add(
+                    egui::DragValue::new(&mut options.wpm)
+                        .range(1..=600)
+                        .suffix(" WPM"),
+                ),
+                TimingMode::Duration => ui.add(
+                    egui::DragValue::new(&mut options.total_seconds)
+                        .range(0.1..=86_400.0)
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" s"),
+                ),
+                TimingMode::FinishAt => ui.add(
+                    egui::TextEdit::singleline(&mut options.finish_at)
+                        .desired_width(if large {
+                            ui.available_width() - 8.0
+                        } else {
+                            104.0
+                        })
+                        .font(if large {
+                            egui::FontSelection::FontId(font)
+                        } else {
+                            egui::FontSelection::Style(egui::TextStyle::Monospace)
+                        })
+                        .hint_text("HH:MM:SS"),
+                ),
+            }
+        })
+        .inner;
     response.labelled_by(label.id);
     if large {
         clock_hint(ui, options);
@@ -2235,7 +2250,12 @@ mod tests {
     fn setup_keeps_its_controls_in_view_with_empty_and_long_text() {
         use egui::epaint::Shape;
 
-        for size in [[390.0, 425.0], [480.0, 520.0], [684.0, 520.0], [880.0, 640.0]] {
+        for size in [
+            [390.0, 425.0],
+            [480.0, 520.0],
+            [684.0, 520.0],
+            [880.0, 640.0],
+        ] {
             for scale in [1.0, 1.5, 2.0] {
                 for (text, formatted) in [
                     (String::new(), false),
@@ -2305,7 +2325,10 @@ mod tests {
         set_theme(&ctx);
         let mut app = AutoTyper::default();
         let mut input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(684.0, 520.0))),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(684.0, 520.0),
+            )),
             ..Default::default()
         };
         ctx.run_ui(input.clone(), |ui| app.show(ui));
