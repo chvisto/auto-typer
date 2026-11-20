@@ -23,8 +23,9 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-            MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, SendInput, UnregisterHotKey, VK_B, VK_CONTROL, VK_ESCAPE,
-            VK_I, VK_LWIN, VK_MENU, VK_N, VK_OEM_2, VK_RETURN, VK_RWIN, VK_S, VK_SHIFT,
+            MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, SendInput, UnregisterHotKey, VK_B,
+            VK_CONTROL, VK_ESCAPE, VK_I, VK_LWIN, VK_MENU, VK_N, VK_OEM_2, VK_RETURN, VK_RWIN,
+            VK_S, VK_SHIFT,
         },
         WindowsAndMessaging::{
             GUITHREADINFO, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
@@ -1446,14 +1447,17 @@ impl AutoTyper {
             let paused = matches!(self.status, Status::Paused(_));
             if self.reading && (!running || paused) {
                 if paused {
-                    let resume = primary("Resume").right_text(
-                        RichText::new("Ctrl+Enter").size(11.0).color(BLACK),
-                    );
+                    let resume = primary("Resume")
+                        .right_text(RichText::new("Ctrl+Enter").size(11.0).color(BLACK));
                     if ui.add(resume).clicked() {
                         self.resume();
                     }
                 }
-                let back = if paused { egui::Button::new("Back to editor") } else { primary("Back to editor") };
+                let back = if paused {
+                    egui::Button::new("Back to editor")
+                } else {
+                    primary("Back to editor")
+                };
                 if ui.add(back).clicked() {
                     self.active = None;
                     self.reading = false;
@@ -1895,8 +1899,12 @@ struct Hotkey(i32);
 impl Hotkey {
     fn register(id: i32, modifiers: u32, key: u16, name: &str) -> Result<Self, String> {
         // SAFETY: the null window handle registers the shortcut on this worker's queue.
-        if unsafe { RegisterHotKey(ptr::null_mut(), id, modifiers | MOD_NOREPEAT, key.into()) } == 0 {
-            return Err(format!("Could not register {name}. {}", io::Error::last_os_error()));
+        if unsafe { RegisterHotKey(ptr::null_mut(), id, modifiers | MOD_NOREPEAT, key.into()) } == 0
+        {
+            return Err(format!(
+                "Could not register {name}. {}",
+                io::Error::last_os_error()
+            ));
         }
         Ok(Self(id))
     }
@@ -2041,9 +2049,10 @@ fn run_job(
             }
             drop(escape.take());
             let shortcut = Hotkey::register(RESUME_HOTKEY, MOD_CONTROL, VK_RETURN, "Ctrl+Enter");
-            let message = shortcut.as_ref().err().map(|_| {
-                "Global Ctrl+Enter is unavailable. Use Resume in AutoTyper.".to_owned()
-            });
+            let message = shortcut
+                .as_ref()
+                .err()
+                .map(|_| "Global Ctrl+Enter is unavailable. Use Resume in AutoTyper.".to_owned());
             paused = Some(PausedRun {
                 at: Instant::now(),
                 requested: false,
@@ -2093,9 +2102,10 @@ fn run_job(
                     let next_fatigue = (requested.pace.exhaustion_reduction() > 0)
                         .then(|| fatigue.unwrap_or_else(|| Fatigue::new(false)));
                     let now = Instant::now();
-                    let adjusted_start = started + paused.as_ref().map_or(Duration::ZERO, |state| {
-                        now.saturating_duration_since(state.at)
-                    });
+                    let adjusted_start = started
+                        + paused.as_ref().map_or(Duration::ZERO, |state| {
+                            now.saturating_duration_since(state.at)
+                        });
                     match Schedule::plan(
                         text,
                         natural.as_deref().unwrap_or_default(),
@@ -3140,7 +3150,11 @@ mod tests {
             Wait::Timing
         );
         signal(&events.control).unwrap();
-        assert!(!events.wait_through(Instant::now() + Duration::from_secs(10)).unwrap());
+        assert!(
+            !events
+                .wait_through(Instant::now() + Duration::from_secs(10))
+                .unwrap()
+        );
         assert!(!events.stopped());
         signal(&events.stop).unwrap();
         assert!(events.stopped());
