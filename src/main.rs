@@ -75,7 +75,11 @@ fn set_theme(ctx: &egui::Context) {
     visuals.selection.bg_fill = Color32::from_rgb(83, 39, 68);
     visuals.selection.stroke = Stroke::new(1.0, ACCENT);
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
-    for widget in [&mut visuals.widgets.inactive, &mut visuals.widgets.hovered, &mut visuals.widgets.active] {
+    for widget in [
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+    ] {
         widget.corner_radius = egui::CornerRadius::same(8);
     }
     visuals.widgets.inactive.bg_fill = CONTROL;
@@ -95,7 +99,9 @@ fn set_theme(ctx: &egui::Context) {
         style.spacing.interact_size.y = 26.0;
         style.spacing.button_padding = egui::vec2(9.0, 4.0);
         for text_style in [egui::TextStyle::Body, egui::TextStyle::Button] {
-            style.text_styles.insert(text_style, egui::FontId::proportional(14.0));
+            style
+                .text_styles
+                .insert(text_style, egui::FontId::proportional(14.0));
         }
     });
 }
@@ -1077,8 +1083,10 @@ impl AutoTyper {
             ),
             |ui| {
                 ui.add(
-                    egui::Label::new(emphasis(format!("{:02}", remaining.ceil() as u32), 96.0).color(ACCENT))
-                        .selectable(false),
+                    egui::Label::new(
+                        emphasis(format!("{:02}", remaining.ceil() as u32), 96.0).color(ACCENT),
+                    )
+                    .selectable(false),
                 );
             },
         );
@@ -1395,7 +1403,8 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     for (mode, label) in choices.into_iter().rev() {
-                        ui.selectable_value(&mut options.mode, mode, label).labelled_by(heading.id);
+                        ui.selectable_value(&mut options.mode, mode, label)
+                            .labelled_by(heading.id);
                     }
                 });
             });
@@ -1403,25 +1412,33 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
                 match options.mode {
                     TimingMode::Wpm => {
                         let label = ui.label(RichText::new("Speed").weak());
-                        ui.add(egui::DragValue::new(&mut options.wpm).range(1..=600).suffix(" WPM"))
-                            .labelled_by(label.id);
+                        ui.add(
+                            egui::DragValue::new(&mut options.wpm)
+                                .range(1..=600)
+                                .suffix(" WPM"),
+                        )
+                        .labelled_by(label.id);
                     }
                     TimingMode::Duration => {
                         let label = ui.label(RichText::new("Typing time").weak());
-                        ui.add(egui::DragValue::new(&mut options.total_seconds)
-                            .range(0.1..=86_400.0)
-                            .speed(0.1)
-                            .fixed_decimals(1)
-                            .suffix(" s"))
-                            .labelled_by(label.id);
+                        ui.add(
+                            egui::DragValue::new(&mut options.total_seconds)
+                                .range(0.1..=86_400.0)
+                                .speed(0.1)
+                                .fixed_decimals(1)
+                                .suffix(" s"),
+                        )
+                        .labelled_by(label.id);
                     }
                     TimingMode::FinishAt => {
                         let label = ui.label(RichText::new("Local time").weak());
-                        ui.add(egui::TextEdit::singleline(&mut options.finish_at)
-                            .desired_width(82.0)
-                            .font(egui::TextStyle::Monospace)
-                            .hint_text("HH:MM:SS"))
-                            .labelled_by(label.id);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut options.finish_at)
+                                .desired_width(82.0)
+                                .font(egui::TextStyle::Monospace)
+                                .hint_text("HH:MM:SS"),
+                        )
+                        .labelled_by(label.id);
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1449,7 +1466,8 @@ fn pause_settings(ui: &mut egui::Ui, options: &mut Options) {
         + usize::from(options.natural_writing)
         + usize::from(options.natural_thinking)
         + usize::from(options.mode == TimingMode::Wpm && options.exhausted_typing);
-    let button = ui.button(format!("Pauses  ·  {count}"))
+    let button = ui
+        .button(format!("Pauses  ·  {count}"))
         .on_hover_text("Punctuation, natural writing, natural thinking and exhausted typing");
     egui::Popup::from_toggle_button_response(&button)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -2156,7 +2174,13 @@ mod tests {
                         let ctx = egui::Context::default();
                         set_theme(&ctx);
                         let mut app = AutoTyper::default();
-                        app.text.push(&text, Style { bold: formatted, ..Default::default() });
+                        app.text.push(
+                            &text,
+                            Style {
+                                bold: formatted,
+                                ..Default::default()
+                            },
+                        );
                         app.options.mode = mode;
                         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size.into());
                         let mut input = egui::RawInput {
@@ -2180,7 +2204,10 @@ mod tests {
                             "Pauses  ·  1",
                             "Countdown",
                             "Start typing",
-                        ].into_iter().chain(formatted.then_some("Send bold & italic")) {
+                        ]
+                        .into_iter()
+                        .chain(formatted.then_some("Send bold & italic"))
+                        {
                             assert!(
                                 output.shapes.iter().any(|clipped| {
                                     let Shape::Text(text) = &clipped.shape else {
