@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod docx;
+mod file_import;
 mod rich_text;
 use std::{
     env, fs, io,
@@ -28,7 +29,8 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             GUITHREADINFO, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
             GetWindowThreadProcessId, IsWindow, MSG, MWMO_INPUTAVAILABLE,
-            MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_HOTKEY, WM_HOTKEY,
+            MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_HOTKEY,
+            SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW, WM_HOTKEY,
         },
     },
 };
@@ -59,7 +61,15 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             set_theme(&cc.egui_ctx);
-            Ok(Box::new(AutoTyper::default()))
+            let mut animate = 0i32;
+            // SAFETY: this query writes a Win32 BOOL into the supplied buffer.
+            let allowed = unsafe {
+                SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, ptr::from_mut(&mut animate).cast(), 0)
+            };
+            Ok(Box::new(AutoTyper {
+                animate_drop: allowed != 0 && animate != 0,
+                ..Default::default()
+            }))
         }),
     )
 }
@@ -780,8 +790,18 @@ impl Drop for ActiveRun {
 }
 
 #[derive(Default)]
+enum DropPulse {
+    #[default]
+    Ready,
+    Running(f64),
+    Still,
+}
+
+#[derive(Default)]
 struct AutoTyper {
     text: Document,
+    animate_drop: bool,
+    drop_pulse: DropPulse,
     plain_text: bool,
     options: Options,
     always_on_top: bool,
@@ -906,9 +926,9 @@ impl eframe::App for AutoTyper {
         let dropped = std::mem::take(&mut input.dropped_files);
         if open || !dropped.is_empty() {
             let selection = match dropped.as_slice() {
-                [] => docx::choose(foreground_window()),
+                [] => file_import::choose(foreground_window()),
                 [file] => Ok(Some(file.path().to_owned())),
-                _ => Err("Drop one Word document at a time.".into()),
+                _ => Err("Drop one file at a time.".into()),
             };
             self.import_document(selection);
             return;
@@ -1015,7 +1035,10 @@ impl eframe::App for AutoTyper {
 
 impl AutoTyper {
     fn import_document(&mut self, selection: Result<Option<PathBuf>, String>) {
-        match selection.and_then(|path| path.as_deref().map(docx::read).transpose()) {
+        match selection.and_then(|path| path.as_deref().map(file_import::read).transpose()) {
+            Ok(Some(document)) if document.trim().is_empty() => {
+                self.status = Status::Error("The file has no text to import.".into());
+            }
             Ok(Some(document)) => {
                 self.text.append_document(document);
                 self.status = Status::Ready;
@@ -1170,6 +1193,16 @@ impl AutoTyper {
         });
         ui.add_space(8.0);
         ui.add_enabled_ui(enabled, |ui| {
+            let was_empty = self.text.is_empty();
+            let drop_zone = was_empty.then(|| {
+                let height = (ui.available_height() * 0.43).clamp(68.0, 116.0);
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), height),
+                    egui::Sense::hover(),
+                );
+                ui.add_space(9.0);
+                rect
+            });
             let has_styles = self.text.has_styles();
             let footer_height = if has_styles { 72.0 } else { 40.0 };
             let text_height = (ui.available_height() - footer_height).max(36.0);
@@ -1191,21 +1224,18 @@ impl AutoTyper {
                         .desired_rows(1)
                         .min_size(egui::vec2(0.0, text_height))
                         .desired_width(f32::INFINITY)
-                        .hint_text(RichText::new("Paste or write here").size(19.0).color(MUTED))
+                        .hint_text(RichText::new("Type here").size(19.0).color(MUTED))
                         .frame(egui::Frame::new())
                         .layouter(&mut layouter))
                         .labelled_by(label)
                 });
+            self.update_drop_pulse(was_empty, editor.inner.gained_focus() || editor.inner.clicked());
+            if let Some(rect) = drop_zone {
+                self.drop_zone(ui, rect);
+            }
             let rule = if editor.inner.has_focus() { WHITE } else { BORDER };
             ui.painter().hline(editor.inner_rect.x_range(), editor.inner_rect.bottom() + 3.0, Stroke::new(1.0, rule));
             compact_row(ui, 27.0, |ui| {
-                if ui
-                    .add(egui::Button::new(emphasis("Open .docx", 13.0)).frame_when_inactive(false))
-                    .on_hover_text("Ctrl+O · Add a Word document below any existing text")
-                    .clicked()
-                {
-                    self.import_document(docx::choose(foreground_window()));
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(format!(
                         "{} words  ·  {} characters",
@@ -1223,6 +1253,49 @@ impl AutoTyper {
                 }
             }
         });
+    }
+
+    fn update_drop_pulse(&mut self, was_empty: bool, entered_editor: bool) {
+        if !was_empty && self.text.is_empty() {
+            self.drop_pulse = DropPulse::Ready;
+        } else if was_empty && entered_editor {
+            self.drop_pulse = DropPulse::Still;
+        }
+    }
+
+    fn drop_zone(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let (focused, hovering, now) =
+            ui.input(|input| (input.focused, !input.raw.hovered_files.is_empty(), input.time));
+        let mut brightness = 75;
+        if self.animate_drop && focused && !hovering {
+            if matches!(self.drop_pulse, DropPulse::Ready) {
+                self.drop_pulse = DropPulse::Running(now);
+            }
+            if let DropPulse::Running(started) = self.drop_pulse {
+                let elapsed = now - started;
+                if elapsed < 4.8 {
+                    let wave = (std::f64::consts::TAU * elapsed / 2.4).cos();
+                    brightness += ((1.0 - wave) * 20.0) as u8;
+                    ui.ctx().request_repaint_after(Duration::from_millis(40));
+                } else {
+                    self.drop_pulse = DropPulse::Still;
+                }
+            }
+        }
+        let stroke = if hovering { WHITE } else { Color32::from_gray(brightness) };
+        let fill = if hovering { SURFACE } else { Color32::from_gray(12) };
+        ui.painter().rect(rect, 12, fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+
+        let mut content = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect.shrink2(egui::vec2(8.0, 0.0)))
+                .layout(egui::Layout::top_down(egui::Align::Center)),
+        );
+        content.spacing_mut().item_spacing.y = 3.0;
+        content.add_space((rect.height() - 52.0) * 0.5);
+        content.label(emphasis("Drag and drop a file", 16.0));
+        content.label(RichText::new(".doc, .docx, .txt").size(12.0).color(MUTED));
+        content.label(RichText::new("Ctrl + O to open").size(12.0).color(MUTED));
     }
 
     fn run_controls(&mut self, ui: &mut egui::Ui) {
@@ -1495,11 +1568,11 @@ fn pace_field(ui: &mut egui::Ui, options: &mut Options, large: bool) {
     let response = ui
         .scope(|ui| {
             let font = egui::FontId::new(29.0, egui::FontFamily::Name(DISPLAY.into()));
-            if large {
+            if large && options.mode != TimingMode::FinishAt {
                 let style = ui.style_mut();
                 style
                     .text_styles
-                    .insert(style.drag_value_text_style.clone(), font.clone());
+                    .insert(style.drag_value_text_style.clone(), font);
                 style.spacing.interact_size.y = 44.0;
             }
             match options.mode {
@@ -1517,16 +1590,9 @@ fn pace_field(ui: &mut egui::Ui, options: &mut Options, large: bool) {
                 ),
                 TimingMode::FinishAt => ui.add(
                     egui::TextEdit::singleline(&mut options.finish_at)
-                        .desired_width(if large {
-                            ui.available_width() - 12.0
-                        } else {
-                            104.0
-                        })
-                        .font(if large {
-                            egui::FontSelection::FontId(font)
-                        } else {
-                            egui::FontSelection::Style(egui::TextStyle::Monospace)
-                        })
+                        .desired_width(104.0)
+                        .font(egui::FontId::monospace(14.0))
+                        .background_color(SURFACE)
                         .hint_text("HH:MM:SS"),
                 ),
             }
@@ -1546,7 +1612,12 @@ fn clock_hint(ui: &mut egui::Ui, options: &Options) {
     if options.mode == TimingMode::FinishAt {
         let now = Local::now();
         let hint = if options.finish_at.trim().is_empty() {
-            format!("PC clock {}", now.format("%H:%M:%S"))
+            if ui.input(|input| input.focused) {
+                ui.ctx().request_repaint_after(Duration::from_millis(
+                    1000 - u64::from(now.timestamp_subsec_millis()),
+                ));
+            }
+            format!("Now · {}", now.format("%H:%M:%S"))
         } else {
             match next_finish(&options.finish_at, now) {
                 Ok(time) => time.format("%a, %b %e  ·  %H:%M:%S local").to_string(),
@@ -2370,7 +2441,6 @@ mod tests {
                         let output = ctx.run_ui(input, |ui| app.show(ui));
                         for label in [
                             "Draft",
-                            "Open .docx",
                             "Pace",
                             "Duration",
                             "Finish by",
@@ -2380,6 +2450,8 @@ mod tests {
                         ]
                         .into_iter()
                         .chain(formatted.then_some("Send bold & italic"))
+                        .chain(text.is_empty().then_some("Drag and drop a file"))
+                        .chain(text.is_empty().then_some("Type here"))
                         {
                             assert!(
                                 output.shapes.iter().any(|clipped| {
@@ -2446,6 +2518,7 @@ mod tests {
             ..Default::default()
         };
         ctx.run_ui(input.clone(), |ui| app.show(ui));
+        app.drop_pulse = DropPulse::Running(0.0);
         let pos = egui::pos2(180.0, 270.0);
         input.events = vec![
             egui::Event::PointerMoved(pos),
@@ -2458,6 +2531,22 @@ mod tests {
         ];
         ctx.run_ui(input, |ui| app.show(ui));
         assert!(ctx.memory(|memory| memory.has_focus(egui::Id::unique(TEXT_EDITOR))));
+        assert!(matches!(app.drop_pulse, DropPulse::Still));
+
+        app.text.push("x", Style::default());
+        let mut clear = egui::RawInput::default();
+        for key in [egui::Key::End, egui::Key::Backspace] {
+            clear.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        ctx.run_ui(clear, |ui| app.show(ui));
+        assert!(app.text.is_empty());
+        assert!(matches!(app.drop_pulse, DropPulse::Ready));
     }
 
     #[test]

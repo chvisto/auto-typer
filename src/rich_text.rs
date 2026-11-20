@@ -199,7 +199,7 @@ impl TextBuffer for Document {
     }
 }
 
-fn normalize(text: &str) -> Cow<'_, str> {
+pub(crate) fn normalize(text: &str) -> Cow<'_, str> {
     if text.contains('\r') {
         Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
     } else {

@@ -1,20 +1,6 @@
-use std::{
-    collections::HashMap,
-    ffi::OsString,
-    fs::File,
-    io::Read,
-    os::windows::ffi::OsStringExt,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, fs::File, io::Read, path::Path};
 
 use roxmltree::{Document as Xml, Node};
-use windows_sys::Win32::{
-    Foundation::HWND,
-    UI::Controls::Dialogs::{
-        CommDlgExtendedError, GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
-        OPENFILENAMEW,
-    },
-};
 use zip::{ZipArchive, result::ZipError};
 
 use crate::rich_text::{Document, Heading, Style, heading_kind};
@@ -23,33 +9,6 @@ const XML_LIMIT: u64 = 16 * 1024 * 1024;
 const ARCHIVE_LIMIT: u64 = 128 * 1024 * 1024;
 const WORDML: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const STRICT_WORDML: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";
-
-pub fn choose(owner: HWND) -> Result<Option<PathBuf>, String> {
-    let mut path = vec![0u16; 32768];
-    let filter: Vec<u16> = "Word documents (*.docx)\0*.docx\0\0"
-        .encode_utf16()
-        .collect();
-    let title: Vec<u16> = "Import Word document\0".encode_utf16().collect();
-    let mut dialog = OPENFILENAMEW {
-        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
-        hwndOwner: owner,
-        lpstrFilter: filter.as_ptr(),
-        lpstrFile: path.as_mut_ptr(),
-        nMaxFile: path.len() as u32,
-        lpstrTitle: title.as_ptr(),
-        Flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR,
-        ..Default::default()
-    };
-    // SAFETY: the owner is the app's HWND and all dialog buffers live through the call.
-    if unsafe { GetOpenFileNameW(&mut dialog) } == 0 {
-        if unsafe { CommDlgExtendedError() } != 0 {
-            return Err("Could not open the Word document picker.".into());
-        }
-        return Ok(None);
-    }
-    let end = path.iter().position(|&ch| ch == 0).unwrap_or(path.len());
-    Ok(Some(PathBuf::from(OsString::from_wide(&path[..end]))))
-}
 
 pub fn read(path: &Path) -> Result<Document, String> {
     if !path
