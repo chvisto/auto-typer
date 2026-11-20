@@ -2938,10 +2938,16 @@ mod tests {
                 },
                 |ui| app.show(ui),
             );
-            output.shapes.iter().find_map(|item| match &item.shape {
-                egui::epaint::Shape::Text(text) if text.galley.text() == label => Some(text.pos.y),
-                _ => None,
-            }).expect("draft text should be visible")
+            output
+                .shapes
+                .iter()
+                .find_map(|item| match &item.shape {
+                    egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.pos.y)
+                    }
+                    _ => None,
+                })
+                .expect("draft text should be visible")
         };
 
         frame(&mut app, 0, "Type here");
@@ -2953,7 +2959,9 @@ mod tests {
         assert!(filled_y + 50.0 < collapse[5] && collapse[5] < empty_y - 10.0);
 
         app.text = Document::default();
-        let reveal: Vec<_> = (21..=39).map(|tick| frame(&mut app, tick, "Type here")).collect();
+        let reveal: Vec<_> = (21..=39)
+            .map(|tick| frame(&mut app, tick, "Type here"))
+            .collect();
         assert!(reveal.windows(2).all(|pair| pair[0] <= pair[1]));
         assert!(filled_y + 10.0 < reveal[5] && reveal[5] < empty_y - 10.0);
         assert!((reveal[18] - empty_y).abs() <= 1.0);
