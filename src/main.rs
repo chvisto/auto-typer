@@ -1331,12 +1331,16 @@ impl AutoTyper {
             let was_empty = self.text.is_empty();
             let drop_zone = was_empty.then(|| {
                 let height = (ui.available_height() * 0.43).clamp(68.0, 116.0);
-                let (rect, _) = ui.allocate_exact_size(
+                let (rect, response) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), height),
-                    egui::Sense::hover(),
+                    egui::Sense::click(),
                 );
+                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Open file")
+                });
                 ui.add_space(9.0);
-                rect
+                (rect, response)
             });
             let has_styles = self.text.has_styles();
             let footer_height = if has_styles { 72.0 } else { 40.0 };
@@ -1368,8 +1372,11 @@ impl AutoTyper {
                 self.paragraph_settings.clear();
             }
             self.update_drop_pulse(was_empty, editor.inner.gained_focus() || editor.inner.clicked());
-            if let Some(rect) = drop_zone {
-                self.drop_zone(ui, rect);
+            if let Some((rect, response)) = drop_zone {
+                self.drop_zone(ui, rect, response.hovered() || response.has_focus());
+                if response.clicked() {
+                    self.import_document(file_import::choose(foreground_window()));
+                }
             }
             let rule = if editor.inner.has_focus() { WHITE } else { BORDER };
             ui.painter().hline(editor.inner_rect.x_range(), editor.inner_rect.bottom() + 3.0, Stroke::new(1.0, rule));
@@ -1401,16 +1408,17 @@ impl AutoTyper {
         }
     }
 
-    fn drop_zone(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
-        let (focused, hovering, now) = ui.input(|input| {
+    fn drop_zone(&mut self, ui: &mut egui::Ui, rect: egui::Rect, highlighted: bool) {
+        let (focused, file_hover, now) = ui.input(|input| {
             (
                 input.focused,
                 !input.raw.hovered_files.is_empty(),
                 input.time,
             )
         });
+        let highlighted = highlighted || file_hover;
         let mut brightness = 75;
-        if self.animate_drop && focused && !hovering {
+        if self.animate_drop && focused && !highlighted {
             if matches!(self.drop_pulse, DropPulse::Ready) {
                 self.drop_pulse = DropPulse::Running(now);
             }
@@ -1425,12 +1433,12 @@ impl AutoTyper {
                 }
             }
         }
-        let stroke = if hovering {
+        let stroke = if highlighted {
             WHITE
         } else {
             Color32::from_gray(brightness)
         };
-        let fill = if hovering {
+        let fill = if highlighted {
             SURFACE
         } else {
             Color32::from_gray(12)
@@ -1450,9 +1458,13 @@ impl AutoTyper {
         );
         content.spacing_mut().item_spacing.y = 3.0;
         content.add_space((rect.height() - 52.0) * 0.5);
-        content.label(emphasis("Drag and drop a file", 16.0));
-        content.label(RichText::new(".doc, .docx, .txt").size(12.0).color(MUTED));
-        content.label(RichText::new("Ctrl + O to open").size(12.0).color(MUTED));
+        content.add(egui::Label::new(emphasis("Drag and drop a file", 16.0)).selectable(false));
+        for label in [".doc, .docx, .txt", "Ctrl + O to open"] {
+            content.add(
+                egui::Label::new(RichText::new(label).size(12.0).color(MUTED))
+                    .selectable(false),
+            );
+        }
     }
 
     fn run_controls(&mut self, ui: &mut egui::Ui) {
