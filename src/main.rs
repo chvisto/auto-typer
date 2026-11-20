@@ -19,12 +19,12 @@ use enigo::{Direction::Click, Enigo, Key, Keyboard, Settings};
 use rich_text::{Document, Heading, Style};
 use windows_sys::Win32::{
     Foundation::{HWND, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
-    System::Threading::{CreateEventW, SetEvent},
+    System::Threading::{CreateEventW, SetEvent, WaitForSingleObject},
     UI::{
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-            MOD_NOREPEAT, RegisterHotKey, SendInput, UnregisterHotKey, VK_B, VK_CONTROL, VK_ESCAPE,
-            VK_I, VK_LWIN, VK_MENU, VK_N, VK_OEM_2, VK_RWIN, VK_S, VK_SHIFT,
+            MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, SendInput, UnregisterHotKey, VK_B, VK_CONTROL, VK_ESCAPE,
+            VK_I, VK_LWIN, VK_MENU, VK_N, VK_OEM_2, VK_RETURN, VK_RWIN, VK_S, VK_SHIFT,
         },
         WindowsAndMessaging::{
             GUITHREADINFO, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
@@ -43,7 +43,8 @@ const SURFACE: Color32 = Color32::from_gray(20);
 const CONTROL: Color32 = Color32::from_gray(30);
 const SEMIBOLD: &str = "Segoe Semibold";
 const DISPLAY: &str = "Bahnschrift";
-const HOTKEY_ID: i32 = 1;
+const ESCAPE_HOTKEY: i32 = 1;
+const RESUME_HOTKEY: i32 = 2;
 const TEXT_EDITOR: &str = "autotyper document";
 
 fn main() -> eframe::Result {
@@ -667,6 +668,7 @@ enum Status {
     Typing,
     Thinking,
     FocusPaused,
+    Paused(Option<String>),
     Stopping,
     Stopped,
     Completed,
@@ -681,6 +683,7 @@ enum Update {
 
 struct Events {
     stop: OwnedHandle,
+    control: OwnedHandle,
     timing: OwnedHandle,
 }
 
@@ -688,6 +691,9 @@ struct Events {
 enum Wait {
     Due,
     Stop,
+    Control,
+    Pause,
+    Resume,
     Timing,
 }
 
@@ -695,12 +701,17 @@ impl Events {
     fn new() -> io::Result<Self> {
         Ok(Self {
             stop: new_event(true)?,
+            control: new_event(false)?,
             timing: new_event(false)?,
         })
     }
 
     fn wait(&self, deadline: Instant) -> Result<Wait, String> {
-        let handles = [self.stop.as_raw_handle(), self.timing.as_raw_handle()];
+        let handles = [
+            self.stop.as_raw_handle(),
+            self.control.as_raw_handle(),
+            self.timing.as_raw_handle(),
+        ];
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let millis = remaining
@@ -710,7 +721,7 @@ impl Events {
             // SAFETY: both handles remain owned for the entirety of the call.
             let result = unsafe {
                 MsgWaitForMultipleObjectsEx(
-                    2,
+                    handles.len() as u32,
                     handles.as_ptr(),
                     millis,
                     QS_HOTKEY,
@@ -727,16 +738,20 @@ impl Events {
                         io::Error::last_os_error()
                     ));
                 }
-                ready if ready == WAIT_OBJECT_0 + 1 => return Ok(Wait::Timing),
-                ready if ready == WAIT_OBJECT_0 + 2 => {
+                ready if ready == WAIT_OBJECT_0 + 1 => return Ok(Wait::Control),
+                ready if ready == WAIT_OBJECT_0 + 2 => return Ok(Wait::Timing),
+                ready if ready == WAIT_OBJECT_0 + 3 => {
                     let mut msg = MSG::default();
                     // SAFETY: the message is a writable output on the hotkey's owning thread.
                     if unsafe {
                         PeekMessageW(&mut msg, ptr::null_mut(), WM_HOTKEY, WM_HOTKEY, PM_REMOVE)
                     } != 0
-                        && msg.wParam == HOTKEY_ID as usize
                     {
-                        return Ok(Wait::Stop);
+                        match msg.wParam as i32 {
+                            ESCAPE_HOTKEY => return Ok(Wait::Pause),
+                            RESUME_HOTKEY => return Ok(Wait::Resume),
+                            _ => {}
+                        }
                     }
                 }
                 _ => {
@@ -748,19 +763,24 @@ impl Events {
         }
     }
 
+    fn stopped(&self) -> bool {
+        // SAFETY: the cancellation event remains owned by this run.
+        unsafe { WaitForSingleObject(self.stop.as_raw_handle(), 0) == WAIT_OBJECT_0 }
+    }
+
     fn wait_through(&self, deadline: Instant) -> Result<bool, String> {
         let mut timing_changed = false;
-        loop {
+        let outcome = loop {
             match self.wait(deadline)? {
-                Wait::Stop => return Ok(false),
+                Wait::Resume => {}
                 Wait::Timing => timing_changed = true,
-                Wait::Due => break,
+                outcome => break outcome,
             }
-        }
-        if timing_changed {
+        };
+        if timing_changed && outcome != Wait::Stop {
             signal(&self.timing).map_err(|error| format!("Could not apply timing. {error}"))?;
         }
-        Ok(true)
+        Ok(outcome == Wait::Due)
     }
 }
 
@@ -839,10 +859,19 @@ impl AutoTyper {
         if self.capture.take().is_some() {
             self.status = Status::Stopped;
         } else if let Some(run) = &self.active {
-            self.status = match signal(&run.events.stop) {
+            self.status = match signal(&run.events.control) {
                 Ok(()) => Status::Stopping,
                 Err(error) => Status::Error(format!("Could not stop typing. {error}")),
             };
+        }
+    }
+
+    fn resume(&mut self) {
+        if matches!(self.status, Status::Paused(_))
+            && let Some(run) = &self.active
+            && let Err(error) = signal(&run.events.control)
+        {
+            self.status = Status::Paused(Some(format!("Could not resume. {error}")));
         }
     }
 
@@ -997,7 +1026,9 @@ impl eframe::App for AutoTyper {
                         if matches!(status, Status::Typing) {
                             self.reading = true;
                         }
-                        if !matches!(self.status, Status::Stopping) {
+                        if !matches!(self.status, Status::Stopping)
+                            || matches!(status, Status::Paused(_))
+                        {
                             self.status = status;
                         }
                     }
@@ -1058,7 +1089,11 @@ impl AutoTyper {
             self.countdown_view(ui, end);
             return;
         }
-        if !self.reading
+        if matches!(self.status, Status::Paused(_))
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Enter))
+        {
+            self.resume();
+        } else if !self.reading
             && self.active.is_none()
             && self.capture.is_none()
             && !self.text.is_empty()
@@ -1408,10 +1443,27 @@ impl AutoTyper {
         self.run_status(ui);
         compact_row(ui, 44.0, |ui| {
             let running = self.active.is_some() || self.capture.is_some();
-            if self.reading && !running {
-                if ui.add(primary("Back to editor")).clicked() {
+            let paused = matches!(self.status, Status::Paused(_));
+            if self.reading && (!running || paused) {
+                if paused {
+                    let resume = primary("Resume").right_text(
+                        RichText::new("Ctrl+Enter").size(11.0).color(BLACK),
+                    );
+                    if ui.add(resume).clicked() {
+                        self.resume();
+                    }
+                }
+                let back = if paused { egui::Button::new("Back to editor") } else { primary("Back to editor") };
+                if ui.add(back).clicked() {
+                    self.active = None;
                     self.reading = false;
+                    self.timing_open = false;
                     self.status = Status::Ready;
+                }
+                if paused && self.reading {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.toggle_value(&mut self.timing_open, "Timing");
+                    });
                 }
             } else if running {
                 if ui
@@ -1441,6 +1493,7 @@ impl AutoTyper {
             | Status::Countdown(_) => None,
             Status::Starting => Some("Starting…"),
             Status::FocusPaused => Some("Focus the original target to resume"),
+            Status::Paused(message) => message.as_deref(),
             Status::Stopping => Some("Stopping…"),
             Status::Stopped if !self.reading => Some("Stopped"),
             Status::Stopped => None,
@@ -1456,7 +1509,7 @@ impl AutoTyper {
         let heading = match self.status {
             Status::Completed => "Completed",
             Status::Stopped | Status::Error(_) => "Stopped",
-            Status::FocusPaused => "Paused",
+            Status::FocusPaused | Status::Paused(_) => "Paused",
             Status::Thinking => "Thinking",
             Status::Stopping => "Stopping",
             _ => "Typing",
@@ -1837,28 +1890,33 @@ fn blurred_backdrop(source: &egui::ColorImage) -> egui::ColorImage {
     egui::ColorImage::new(size, blurred)
 }
 
-struct EscapeHotkey;
+struct Hotkey(i32);
 
-impl EscapeHotkey {
-    fn register() -> Result<Self, String> {
-        // SAFETY: the null window handle registers Esc on this worker's message queue.
-        if unsafe { RegisterHotKey(ptr::null_mut(), HOTKEY_ID, MOD_NOREPEAT, VK_ESCAPE.into()) }
-            == 0
-        {
-            return Err(format!(
-                "Could not register Esc. {}",
-                io::Error::last_os_error()
-            ));
+impl Hotkey {
+    fn register(id: i32, modifiers: u32, key: u16, name: &str) -> Result<Self, String> {
+        // SAFETY: the null window handle registers the shortcut on this worker's queue.
+        if unsafe { RegisterHotKey(ptr::null_mut(), id, modifiers | MOD_NOREPEAT, key.into()) } == 0 {
+            return Err(format!("Could not register {name}. {}", io::Error::last_os_error()));
         }
-        Ok(Self)
+        Ok(Self(id))
+    }
+
+    fn escape() -> Result<Self, String> {
+        Self::register(ESCAPE_HOTKEY, 0, VK_ESCAPE, "Esc")
     }
 }
 
-impl Drop for EscapeHotkey {
+impl Drop for Hotkey {
     fn drop(&mut self) {
-        // SAFETY: only the thread that registered the hotkey owns this guard.
-        unsafe { UnregisterHotKey(ptr::null_mut(), HOTKEY_ID) };
+        // SAFETY: the hotkey guard stays on the thread that registered it.
+        unsafe { UnregisterHotKey(ptr::null_mut(), self.0) };
     }
+}
+
+struct PausedRun {
+    at: Instant,
+    requested: bool,
+    _hotkey: Option<Hotkey>,
 }
 
 fn next_thinking_interval() -> Duration {
@@ -1915,13 +1973,13 @@ fn run_job(
     changes: &mpsc::Receiver<Timing>,
     report: impl Fn(Update),
 ) -> Result<bool, String> {
-    let _hotkey = EscapeHotkey::register()?;
+    let mut escape = Some(Hotkey::escape()?);
     let mut enigo = Enigo::new(&Settings::default())
         .map_err(|error| format!("Could not initialize keyboard input. {error}"))?;
     let mut natural = timing
         .natural_writing
         .then(|| natural_cadence(text, rand::random::<f64>));
-    let started = Instant::now() + countdown;
+    let mut started = Instant::now() + countdown;
     let mut schedule = Schedule::plan(
         text,
         natural.as_deref().unwrap_or_default(),
@@ -1933,7 +1991,7 @@ fn run_job(
         false,
     )?;
     report(Update::Status(Status::Countdown(started)));
-    if events.wait(started)? == Wait::Stop {
+    if !events.wait_through(started)? {
         return Ok(false);
     }
 
@@ -1946,6 +2004,7 @@ fn run_job(
     if process_id == 0 || process_id == std::process::id() {
         return Err("Click the target text field before the countdown ends.".into());
     }
+    let target_control = focused_control(target);
 
     if matches!(timing.pace, Pace::FinishAt(_)) {
         schedule = Schedule::plan(
@@ -1973,18 +2032,59 @@ fn run_job(
         styles.filter(|styles| styles.iter().any(|style| style.heading != Heading::Body));
     let editor = headings.map(|_| HeadingEditor::detect(target));
     report(Update::Status(Status::Typing));
+    let mut paused: Option<PausedRun> = None;
+    let mut pause_requested = false;
     while sent < text.len() {
+        if pause_requested {
+            if events.stopped() {
+                return Ok(false);
+            }
+            drop(escape.take());
+            let shortcut = Hotkey::register(RESUME_HOTKEY, MOD_CONTROL, VK_RETURN, "Ctrl+Enter");
+            let message = shortcut.as_ref().err().map(|_| {
+                "Global Ctrl+Enter is unavailable. Use Resume in AutoTyper.".to_owned()
+            });
+            paused = Some(PausedRun {
+                at: Instant::now(),
+                requested: false,
+                _hotkey: shortcut.ok(),
+            });
+            pause_requested = false;
+            report(Update::Status(Status::Paused(message)));
+        }
+
         let due = schedule.next(next);
         let thinking_at =
             thinking_left.and_then(|left| schedule.thinking_at(next, left, thinking_spent));
         let check_focus = Instant::now() + Duration::from_millis(125);
-        let deadline = if focus_paused {
+        let deadline = if let Some(state) = &paused {
+            if state.requested {
+                check_focus
+            } else {
+                Instant::now() + Duration::from_secs(86_400)
+            }
+        } else if focus_paused {
             check_focus
         } else {
             thinking_at.unwrap_or(due).min(check_focus)
         };
         match events.wait(deadline)? {
             Wait::Stop => return Ok(false),
+            Wait::Pause | Wait::Control if paused.is_none() => {
+                pause_requested = true;
+                continue;
+            }
+            Wait::Resume | Wait::Control => {
+                if let Some(state) = &mut paused {
+                    state.requested = true;
+                    report(Update::Status(Status::Paused(Some(
+                        "Focus the original text field to resume".into(),
+                    ))));
+                } else {
+                    continue;
+                }
+            }
+            Wait::Pause => continue,
             Wait::Timing => {
                 if let Some(requested) = changes.try_iter().last() {
                     if requested.natural_writing {
@@ -1992,12 +2092,16 @@ fn run_job(
                     }
                     let next_fatigue = (requested.pace.exhaustion_reduction() > 0)
                         .then(|| fatigue.unwrap_or_else(|| Fatigue::new(false)));
+                    let now = Instant::now();
+                    let adjusted_start = started + paused.as_ref().map_or(Duration::ZERO, |state| {
+                        now.saturating_duration_since(state.at)
+                    });
                     match Schedule::plan(
                         text,
                         natural.as_deref().unwrap_or_default(),
                         requested,
-                        started,
-                        Instant::now(),
+                        adjusted_start,
+                        now,
                         SystemTime::now(),
                         previous,
                         next_fatigue.is_some_and(|phase| phase.tired),
@@ -2019,6 +2123,55 @@ fn run_job(
                 continue;
             }
             Wait::Due => {}
+        }
+
+        if let Some(state) = &mut paused {
+            if !state.requested {
+                continue;
+            }
+            let mut live_process = 0;
+            // SAFETY: the output PID is writable and Windows validates the target handle.
+            unsafe { GetWindowThreadProcessId(target, &mut live_process) };
+            if live_process != process_id {
+                return Err("The original target window was closed.".into());
+            }
+            if foreground_window() != target
+                || (!target_control.is_null() && focused_control(target) != target_control)
+                || key_held(VK_CONTROL)
+                || key_held(VK_RETURN)
+            {
+                continue;
+            }
+            let now = Instant::now();
+            let resumed_start = started + now.saturating_duration_since(state.at);
+            let resumed = Schedule::plan(
+                text,
+                natural.as_deref().unwrap_or_default(),
+                timing,
+                resumed_start,
+                now,
+                SystemTime::now(),
+                previous,
+                fatigue.is_some_and(|phase| phase.tired),
+            )
+            .and_then(|schedule| Ok((schedule, Hotkey::escape()?)));
+            match resumed {
+                Ok((updated, hotkey)) => {
+                    escape = Some(hotkey);
+                    paused = None;
+                    started = resumed_start;
+                    schedule = updated;
+                    next = 0;
+                    thinking_spent = Duration::ZERO;
+                    focus_paused = false;
+                    report(Update::Status(Status::Typing));
+                }
+                Err(message) => {
+                    state.requested = false;
+                    report(Update::Status(Status::Paused(Some(message))));
+                }
+            }
+            continue;
         }
 
         if foreground_window() != target {
@@ -2083,7 +2236,8 @@ fn run_job(
             };
             report(Update::Status(Status::Thinking));
             if !events.wait_through(end)? {
-                return Ok(false);
+                pause_requested = true;
+                continue;
             }
             if let Some(updated) = after {
                 schedule = updated;
@@ -2127,7 +2281,8 @@ fn run_job(
                     && (style.heading != paragraph || style.heading != Heading::Body)
                 {
                     if !editor.apply(target, style.heading, &mut enigo, events)? {
-                        return Ok(false);
+                        pause_requested = true;
+                        continue;
                     }
                     paragraph = style.heading;
                 }
@@ -2353,6 +2508,11 @@ fn style_input_error(error: enigo::InputError) -> String {
     format!("Could not apply the paragraph style. {error}")
 }
 
+fn key_held(key: u16) -> bool {
+    // SAFETY: GetAsyncKeyState reads the state of a Win32 virtual key.
+    unsafe { GetAsyncKeyState(i32::from(key)) < 0 }
+}
+
 fn send_shortcut(target: HWND, modifiers: &[u16], keys: &[(u16, bool)]) -> Result<(), String> {
     let key_input = |key, up| INPUT {
         r#type: INPUT_KEYBOARD,
@@ -2382,7 +2542,7 @@ fn send_shortcut(target: HWND, modifiers: &[u16], keys: &[(u16, bool)]) -> Resul
                 .filter(|(_, changed)| *changed)
                 .map(|(key, _)| *key),
         )
-        .any(|key| unsafe { GetAsyncKeyState(i32::from(key)) } < 0);
+        .any(key_held);
     if some_key_held || foreground_window() != target {
         return Err("Formatting stopped because the target or keyboard state changed.".into());
     }
@@ -2979,7 +3139,11 @@ mod tests {
                 .unwrap(),
             Wait::Timing
         );
+        signal(&events.control).unwrap();
+        assert!(!events.wait_through(Instant::now() + Duration::from_secs(10)).unwrap());
+        assert!(!events.stopped());
         signal(&events.stop).unwrap();
+        assert!(events.stopped());
         assert_eq!(
             events
                 .wait(Instant::now() + Duration::from_secs(2))
