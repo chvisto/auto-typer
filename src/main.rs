@@ -52,7 +52,8 @@ const TEXT_EDITOR: &str = "autotyper document";
 
 fn main() -> eframe::Result {
     let agent = if env::args_os().nth(1).is_some_and(|arg| arg == "--mcp") {
-        let Some(session) = mcp::Session::start().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?
+        let Some(session) =
+            mcp::Session::start().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?
         else {
             return Ok(());
         };
@@ -70,7 +71,11 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        if agent.is_some() { "AutoTyper · MCP" } else { "AutoTyper" },
+        if agent.is_some() {
+            "AutoTyper · MCP"
+        } else {
+            "AutoTyper"
+        },
         options,
         Box::new(move |cc| {
             if let Some(session) = &agent {
@@ -943,11 +948,17 @@ impl AutoTyper {
         } else {
             paragraph_ends(&text)
         };
-        let plan = ends.into_iter().enumerate().map(|(index, end)| {
-            let timing = self.paragraph_settings.get(&index)
-                .map_or(Ok(default), |options| options.timing(wall_now))?;
-            Ok(RunParagraph { end, timing })
-        }).collect::<Result<Vec<_>, String>>()?;
+        let plan = ends
+            .into_iter()
+            .enumerate()
+            .map(|(index, end)| {
+                let timing = self
+                    .paragraph_settings
+                    .get(&index)
+                    .map_or(Ok(default), |options| options.timing(wall_now))?;
+                Ok(RunParagraph { end, timing })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let timing = plan[0].timing;
         let paragraph_count = plan.len();
         let countdown = Duration::from_secs(u64::from(self.options.countdown));
@@ -1002,7 +1013,10 @@ impl AutoTyper {
             return;
         }
         let result = self.options.timing(Local::now()).and_then(|timing| {
-            self.send_timing(TimingEdit { paragraph: None, timing })
+            self.send_timing(TimingEdit {
+                paragraph: None,
+                timing,
+            })
         });
         self.timing_feedback = result.err().map(Err);
     }
@@ -2191,7 +2205,9 @@ fn run_job(
                         continue;
                     }
                     if index < chunk {
-                        report(Update::Timing(Err("That paragraph has already finished.".into())));
+                        report(Update::Timing(Err(
+                            "That paragraph has already finished.".into()
+                        )));
                         continue;
                     }
                     let requested = change.timing;
@@ -2440,7 +2456,9 @@ fn run_job(
             chunk += 1;
             text = &all_text[offset..plan[chunk].end];
             timing = plan[chunk].timing;
-            natural = timing.natural_writing.then(|| natural_cadence(text, rand::random::<f64>));
+            natural = timing
+                .natural_writing
+                .then(|| natural_cadence(text, rand::random::<f64>));
             started = Instant::now();
             previous = None;
             sent = 0;

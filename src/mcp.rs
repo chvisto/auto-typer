@@ -10,7 +10,10 @@ use eframe::egui::{self, TextBuffer};
 use serde_json::{Value, json};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
-use crate::{AutoTyper, Document, Options, Pace, Status, TimingEdit, file_import, foreground_window, paragraph_ends};
+use crate::{
+    AutoTyper, Document, Options, Pace, Status, TimingEdit, file_import, foreground_window,
+    paragraph_ends,
+};
 
 const MAX_MESSAGE: u64 = 1024 * 1024;
 const VERSION: &str = "2025-11-25";
@@ -33,22 +36,39 @@ impl Session {
         let (out, calls) = mpsc::channel();
         let wake: Arc<OnceLock<egui::Context>> = Arc::new(OnceLock::new());
         let repaint = Arc::clone(&wake);
-        thread::Builder::new().name("mcp stdio".into()).spawn(move || {
-            let _ = serve(&mut io::stdin().lock(), &mut io::stdout().lock(), |name, arguments| {
-                let (reply, response) = mpsc::channel();
-                out.send(Call {name, arguments, reply}).map_err(|_| "AutoTyper closed.")?;
+        thread::Builder::new()
+            .name("mcp stdio".into())
+            .spawn(move || {
+                let _ = serve(
+                    &mut io::stdin().lock(),
+                    &mut io::stdout().lock(),
+                    |name, arguments| {
+                        let (reply, response) = mpsc::channel();
+                        out.send(Call {
+                            name,
+                            arguments,
+                            reply,
+                        })
+                        .map_err(|_| "AutoTyper closed.")?;
+                        if let Some(ctx) = repaint.get() {
+                            ctx.request_repaint();
+                        }
+                        response
+                            .recv()
+                            .map_err(|_| "AutoTyper closed while handling the request.")?
+                    },
+                );
+                drop(out);
                 if let Some(ctx) = repaint.get() {
                     ctx.request_repaint();
                 }
-                response.recv().map_err(|_| "AutoTyper closed while handling the request.")?
-            });
-            drop(out);
-            if let Some(ctx) = repaint.get() {
-                ctx.request_repaint();
-            }
-        })?;
+            })?;
         // A client can list tools without opening a desktop window.
-        Ok(calls.recv().ok().map(|first| Self { calls, first: Some(first), wake }))
+        Ok(calls.recv().ok().map(|first| Self {
+            calls,
+            first: Some(first),
+            wake,
+        }))
     }
 
     pub fn wake_with(&self, context: egui::Context) {
@@ -57,12 +77,19 @@ impl Session {
 
     pub fn process(&mut self, app: &mut AutoTyper, ctx: &egui::Context) -> bool {
         loop {
-            let call = match self.first.take().map(Ok).unwrap_or_else(|| self.calls.try_recv()) {
+            let call = match self
+                .first
+                .take()
+                .map(Ok)
+                .unwrap_or_else(|| self.calls.try_recv())
+            {
                 Ok(call) => call,
                 Err(mpsc::TryRecvError::Empty) => return true,
                 Err(mpsc::TryRecvError::Disconnected) => return false,
             };
-            let _ = call.reply.send(call_tool(app, ctx, &call.name, call.arguments));
+            let _ = call
+                .reply
+                .send(call_tool(app, ctx, &call.name, call.arguments));
         }
     }
 }
@@ -80,18 +107,31 @@ fn serve(
     let mut line = Vec::new();
     loop {
         line.clear();
-        if (&mut *input).take(MAX_MESSAGE + 1).read_until(b'\n', &mut line)? == 0 {
+        if (&mut *input)
+            .take(MAX_MESSAGE + 1)
+            .read_until(b'\n', &mut line)?
+            == 0
+        {
             return Ok(());
         }
         if line.len() as u64 > MAX_MESSAGE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "MCP message exceeds 1 MiB"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "MCP message exceeds 1 MiB",
+            ));
         }
         let response = match serde_json::from_slice::<Value>(&line) {
             Err(_) => error(Value::Null, -32700, "Parse error"),
             Ok(request) => {
                 let id = request.get("id").cloned();
-                let Some(method) = request["method"].as_str().filter(|_| request["jsonrpc"] == "2.0") else {
-                    write_message(output, &error(id.unwrap_or(Value::Null), -32600, "Invalid request"))?;
+                let Some(method) = request["method"]
+                    .as_str()
+                    .filter(|_| request["jsonrpc"] == "2.0")
+                else {
+                    write_message(
+                        output,
+                        &error(id.unwrap_or(Value::Null), -32600, "Invalid request"),
+                    )?;
                     continue;
                 };
                 let Some(id) = id else { continue };
@@ -130,15 +170,22 @@ fn serve(
                             write_message(output, &error(id, -32602, "Missing tool name"))?;
                             continue;
                         };
-                        let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                        let arguments = params
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or_else(|| json!({}));
                         let outcome = if arguments.is_object() {
                             call(name.to_owned(), arguments)
                         } else {
                             Err("Tool arguments must be an object.".into())
                         };
                         match outcome {
-                            Ok(content) => json!({"content":[{"type":"text","text":content.to_string()}],"structuredContent":content}),
-                            Err(message) => json!({"content":[{"type":"text","text":message}],"isError":true}),
+                            Ok(content) => {
+                                json!({"content":[{"type":"text","text":content.to_string()}],"structuredContent":content})
+                            }
+                            Err(message) => {
+                                json!({"content":[{"type":"text","text":message}],"isError":true})
+                            }
                         }
                     }
                     _ => {
@@ -262,7 +309,9 @@ fn call_tool(app: &mut AutoTyper, ctx: &egui::Context, name: &str, arguments: Va
                     }
                     let mut foreground_process = 0;
                     // SAFETY: Windows validates the handle and writes into a live PID buffer.
-                    unsafe { GetWindowThreadProcessId(foreground_window(), &mut foreground_process) };
+                    unsafe {
+                        GetWindowThreadProcessId(foreground_window(), &mut foreground_process)
+                    };
                     if foreground_process != std::process::id() {
                         return Err("Focus the AutoTyper window before starting, then select the destination field during the countdown.".into());
                     }
@@ -304,7 +353,9 @@ fn configure(app: &mut AutoTyper, ctx: &egui::Context, args: ConfigureArgs) -> R
                 return Err(format!("Paragraph {index} is out of range for this draft."));
             }
             if let Some(run) = &app.active
-                && (index < app.running_paragraph || app.paragraph_settings.is_empty() || index >= run.paragraph_count)
+                && (index < app.running_paragraph
+                    || app.paragraph_settings.is_empty()
+                    || index >= run.paragraph_count)
             {
                 return Err("Edit a current or future paragraph in a paragraph-timed run.".into());
             }
@@ -313,7 +364,10 @@ fn configure(app: &mut AutoTyper, ctx: &egui::Context, args: ConfigureArgs) -> R
             &app.options
         };
         let mut settings = serde_json::to_value(current).map_err(|error| error.to_string())?;
-        settings.as_object_mut().expect("Options serialize as an object").extend(patch);
+        settings
+            .as_object_mut()
+            .expect("Options serialize as an object")
+            .extend(patch);
         let options: Options = parse(settings)?;
         let [minimum, maximum] = options.thinking_seconds;
         if !(1..=600).contains(&options.wpm)
@@ -322,13 +376,19 @@ fn configure(app: &mut AutoTyper, ctx: &egui::Context, args: ConfigureArgs) -> R
             || !(1..=90).contains(&options.exhaustion_reduction)
             || !(0.1..=600.0).contains(&minimum)
             || !(minimum..=600.0).contains(&maximum)
-            || options.pauses.iter().any(|pause| !(0.0..=600.0).contains(&pause.seconds))
+            || options
+                .pauses
+                .iter()
+                .any(|pause| !(0.0..=600.0).contains(&pause.seconds))
         {
             return Err("One or more timing settings are outside the supported range.".into());
         }
         let timing = options.timing(Local::now())?;
         if app.active.is_some() {
-            app.send_timing(TimingEdit { paragraph: index, timing })?;
+            app.send_timing(TimingEdit {
+                paragraph: index,
+                timing,
+            })?;
             app.timing_feedback = None;
         }
         if let Some(index) = index {
@@ -376,7 +436,10 @@ fn state(app: &AutoTyper, include_text: bool) -> Value {
         entry
     }).collect();
     let countdown_remaining = if let Status::Countdown(end) = app.status {
-        Some(end.saturating_duration_since(std::time::Instant::now()).as_secs_f64())
+        Some(
+            end.saturating_duration_since(std::time::Instant::now())
+                .as_secs_f64(),
+        )
     } else {
         None
     };
@@ -415,9 +478,15 @@ mod tests {
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
         );
         let mut output = Vec::new();
-        serve(&mut messages.as_bytes(), &mut output, |_, _| panic!("unexpected app call")).unwrap();
-        let responses: Vec<Value> = String::from_utf8(output).unwrap().lines()
-            .map(|line| serde_json::from_str(line).unwrap()).collect();
+        serve(&mut messages.as_bytes(), &mut output, |_, _| {
+            panic!("unexpected app call")
+        })
+        .unwrap();
+        let responses: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert_eq!(responses.len(), 2);
         assert_eq!(responses[0]["result"]["protocolVersion"], VERSION);
         assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 4);
@@ -427,8 +496,20 @@ mod tests {
     fn settings_patch_a_unicode_paragraph_without_changing_its_neighbor() {
         let mut app = AutoTyper::default();
         let context = egui::Context::default();
-        call_tool(&mut app, &context, "autotyper_set_draft", json!({"text":"Café.\n\nSecond.\n"})).unwrap();
-        configure(&mut app, &context, parse(json!({"paragraph":1,"settings":{"mode":"duration","total_seconds":3.0}})).unwrap()).unwrap();
+        call_tool(
+            &mut app,
+            &context,
+            "autotyper_set_draft",
+            json!({"text":"Café.\n\nSecond.\n"}),
+        )
+        .unwrap();
+        configure(
+            &mut app,
+            &context,
+            parse(json!({"paragraph":1,"settings":{"mode":"duration","total_seconds":3.0}}))
+                .unwrap(),
+        )
+        .unwrap();
         let snapshot = state(&app, true);
         assert_eq!(snapshot["paragraphs"][0]["end_char"], 5);
         assert_eq!(snapshot["paragraphs"][0]["settings"], Value::Null);
