@@ -1399,12 +1399,11 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
         .inner_margin(11)
         .show(ui, |ui| {
             compact_row(ui, 29.0, |ui| {
-                let heading = ui.label(emphasis("Timing", 14.0));
+                ui.label(emphasis("Timing", 14.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     for (mode, label) in choices.into_iter().rev() {
-                        ui.selectable_value(&mut options.mode, mode, label)
-                            .labelled_by(heading.id);
+                        ui.selectable_value(&mut options.mode, mode, label);
                     }
                 });
             });
@@ -1434,7 +1433,7 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options) {
                         let label = ui.label(RichText::new("Local time").weak());
                         ui.add(
                             egui::TextEdit::singleline(&mut options.finish_at)
-                                .desired_width(82.0)
+                                .desired_width(104.0)
                                 .font(egui::TextStyle::Monospace)
                                 .hint_text("HH:MM:SS"),
                         )
