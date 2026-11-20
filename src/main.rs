@@ -18,22 +18,27 @@ use std::{
 use chrono::{DateTime, Local, LocalResult, NaiveTime, TimeZone};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use enigo::{Direction::Click, Enigo, Key, Keyboard, Settings};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use rich_text::{Document, Heading, Style};
 use windows_sys::Win32::{
-    Foundation::{HWND, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Foundation::{HWND, LPARAM, LRESULT, RECT, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM},
     System::Threading::{CreateEventW, SetEvent, WaitForSingleObject},
     UI::{
+        HiDpi::GetDpiForWindow,
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
             MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, SendInput, UnregisterHotKey, VK_B,
             VK_CONTROL, VK_ESCAPE, VK_I, VK_LWIN, VK_MENU, VK_N, VK_OEM_2, VK_RETURN, VK_RWIN,
             VK_S, VK_SHIFT,
         },
+        Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
-            GUITHREADINFO, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowTextW,
-            GetWindowThreadProcessId, IsWindow, MSG, MWMO_INPUTAVAILABLE,
-            MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_HOTKEY,
-            SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW, WM_HOTKEY,
+            GUITHREADINFO, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowRect,
+            GetWindowTextW, GetWindowThreadProcessId, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
+            HTCAPTION, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IsWindow, IsZoomed, MSG,
+            MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_HOTKEY,
+            SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW, WM_HOTKEY, WM_NCDESTROY,
+            WM_NCHITTEST,
         },
     },
 };
@@ -46,6 +51,9 @@ const SURFACE: Color32 = Color32::from_gray(20);
 const CONTROL: Color32 = Color32::from_gray(30);
 const SEMIBOLD: &str = "Segoe Semibold";
 const DISPLAY: &str = "Bahnschrift";
+const TITLE_BAR_HEIGHT: f32 = 54.0;
+const TITLE_BAR_CONTROL_WIDTH: f32 = 46.0;
+const TITLE_BAR_RIGHT_PAD: f32 = 6.0;
 const ESCAPE_HOTKEY: i32 = 1;
 const RESUME_HOTKEY: i32 = 2;
 const TEXT_EDITOR: &str = "autotyper document";
@@ -65,9 +73,10 @@ fn main() -> eframe::Result {
         .expect("the bundled AutoTyper icon must be a valid PNG");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_icon(icon)
-            .with_inner_size([684.0, 520.0])
-            .with_min_inner_size([390.0, 425.0]),
+            .with_icon(icon.clone())
+            .with_decorations(false)
+            .with_inner_size([684.0, 520.0 + TITLE_BAR_HEIGHT])
+            .with_min_inner_size([390.0, 425.0 + TITLE_BAR_HEIGHT]),
         ..Default::default()
     };
     eframe::run_native(
@@ -78,6 +87,17 @@ fn main() -> eframe::Result {
         },
         options,
         Box::new(move |cc| {
+            let handle = cc.window_handle()?;
+            let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+                return Err(io::Error::other("AutoTyper needs a Windows window handle.").into());
+            };
+            // SAFETY: eframe owns this live HWND on the current UI thread.
+            if unsafe {
+                SetWindowSubclass(handle.hwnd.get() as HWND, Some(title_bar_hit_test), 0, 0)
+            } == 0
+            {
+                return Err(io::Error::other("Could not set up AutoTyper's title bar.").into());
+            }
             if let Some(session) = &agent {
                 session.wake_with(cc.egui_ctx.clone());
             }
@@ -95,10 +115,80 @@ fn main() -> eframe::Result {
             Ok(Box::new(AutoTyper {
                 agent,
                 animate_drop: allowed != 0 && animate != 0,
+                title_icon: Some(cc.egui_ctx.load_texture(
+                    "AutoTyper icon",
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [icon.width as usize, icon.height as usize],
+                        &icon.rgba,
+                    ),
+                    egui::TextureOptions::LINEAR,
+                )),
                 ..Default::default()
             }))
         }),
     )
+}
+
+unsafe extern "system" fn title_bar_hit_test(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    id: usize,
+    _: usize,
+) -> LRESULT {
+    // SAFETY: comctl32 invokes this callback on the window's thread with its live HWND.
+    unsafe {
+        if message == WM_NCDESTROY {
+            RemoveWindowSubclass(hwnd, Some(title_bar_hit_test), id);
+        }
+        if message == WM_NCHITTEST {
+            let mut bounds = RECT::default();
+            if GetWindowRect(hwnd, &mut bounds) != 0 {
+                let x = (lparam as i16 as i32) - bounds.left;
+                let y = ((lparam >> 16) as i16 as i32) - bounds.top;
+                let width = bounds.right - bounds.left;
+                let height = bounds.bottom - bounds.top;
+                let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+                if let Some(hit) = title_bar_part(x, y, width, height, scale, IsZoomed(hwnd) != 0) {
+                    return hit as LRESULT;
+                }
+            }
+        }
+        DefSubclassProc(hwnd, message, wparam, lparam)
+    }
+}
+
+fn title_bar_part(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    scale: f32,
+    maximized: bool,
+) -> Option<u32> {
+    if !(0..width).contains(&x) || !(0..height).contains(&y) {
+        return None;
+    }
+    if !maximized {
+        let edge = (5.0 * scale).round() as i32;
+        let hit = match (x < edge, x >= width - edge, y < edge, y >= height - edge) {
+            (true, _, true, _) => Some(HTTOPLEFT),
+            (_, true, true, _) => Some(HTTOPRIGHT),
+            (true, _, _, true) => Some(HTBOTTOMLEFT),
+            (_, true, _, true) => Some(HTBOTTOMRIGHT),
+            (true, _, _, _) => Some(HTLEFT),
+            (_, true, _, _) => Some(HTRIGHT),
+            (_, _, true, _) => Some(HTTOP),
+            (_, _, _, true) => Some(HTBOTTOM),
+            _ => None,
+        };
+        if hit.is_some() {
+            return hit;
+        }
+    }
+    let buttons = ((3.0 * TITLE_BAR_CONTROL_WIDTH + TITLE_BAR_RIGHT_PAD) * scale).round() as i32;
+    (x < width - buttons && y < (TITLE_BAR_HEIGHT * scale).round() as i32).then_some(HTCAPTION)
 }
 
 fn set_theme(ctx: &egui::Context) {
@@ -875,6 +965,7 @@ enum DropPulse {
 #[derive(Default)]
 struct AutoTyper {
     agent: Option<mcp::Session>,
+    title_icon: Option<egui::TextureHandle>,
     paragraph_settings: BTreeMap<usize, Options>,
     running_paragraph: usize,
     text: Document,
@@ -901,8 +992,9 @@ impl AutoTyper {
         self.capture = Some((Instant::now(), receive));
         self.status = Status::Starting;
         let repaint = ctx.clone();
+        let title_rows = (TITLE_BAR_HEIGHT * ctx.pixels_per_point()).round() as usize;
         ctx.request_screenshot(move |image| {
-            let _ = send.send(blurred_backdrop(&image));
+            let _ = send.send(blurred_backdrop(&image, title_rows));
             repaint.request_repaint();
         });
         ctx.request_repaint_after(Duration::from_millis(150));
@@ -1159,11 +1251,117 @@ impl eframe::App for AutoTyper {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::Panel::top("title bar")
+            .exact_size(TITLE_BAR_HEIGHT)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(BLACK))
+            .show(ui, |ui| self.title_bar(ui));
         self.show(ui);
     }
 }
 
 impl AutoTyper {
+    fn title_bar(&self, ui: &mut egui::Ui) {
+        let bounds = ui.available_rect_before_wrap();
+        ui.allocate_rect(bounds, egui::Sense::hover());
+        let painter = ui.painter();
+        painter.hline(
+            bounds.x_range(),
+            bounds.bottom() - 0.5,
+            Stroke::new(1.0, BORDER),
+        );
+
+        let icon_rect =
+            egui::Rect::from_min_size(bounds.min + egui::vec2(17.0, 16.0), egui::vec2(22.0, 22.0));
+        if let Some(icon) = &self.title_icon {
+            painter.image(
+                icon.id(),
+                icon_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                WHITE,
+            );
+        }
+        painter.text(
+            bounds.left_center() + egui::vec2(50.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            if self.agent.is_some() {
+                "AutoTyper · MCP"
+            } else {
+                "AutoTyper"
+            },
+            egui::FontId::new(14.0, egui::FontFamily::Name(SEMIBOLD.into())),
+            WHITE,
+        );
+
+        let maximized = ui.input(|input| input.viewport().maximized == Some(true));
+        let control_width = TITLE_BAR_CONTROL_WIDTH;
+        let controls_left = bounds.right() - TITLE_BAR_RIGHT_PAD - 3.0 * control_width;
+        for (index, (label, command)) in [
+            ("Minimize", egui::ViewportCommand::Minimized(true)),
+            (
+                if maximized { "Restore" } else { "Maximize" },
+                egui::ViewportCommand::Maximized(!maximized),
+            ),
+            ("Close", egui::ViewportCommand::Close),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let center = egui::pos2(
+                controls_left + (index as f32 + 0.5) * control_width,
+                bounds.center().y,
+            );
+            let rect = egui::Rect::from_center_size(
+                center,
+                egui::vec2(control_width, bounds.height() - 2.0),
+            );
+            let response = ui.interact(
+                rect,
+                ui.scope_id().with(("caption button", index)),
+                egui::Sense::click(),
+            );
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, label)
+            });
+            if response.hovered() || response.has_focus() {
+                painter.rect_filled(rect.shrink2(egui::vec2(2.0, 4.0)), 5, CONTROL);
+            }
+            let stroke = Stroke::new(1.6, WHITE);
+            let point = |x, y| center + egui::vec2(x, y);
+            match index {
+                0 => {
+                    painter.line_segment([point(-6.0, 0.0), point(6.0, 0.0)], stroke);
+                }
+                1 => {
+                    painter.line(
+                        vec![
+                            point(-1.5, -6.0),
+                            point(4.0, -6.0),
+                            point(6.5, -4.0),
+                            point(6.5, 3.0),
+                        ],
+                        stroke,
+                    );
+                    painter.rect_stroke(
+                        egui::Rect::from_min_size(point(-4.5, -3.0), egui::vec2(9.5, 9.5)),
+                        2,
+                        stroke,
+                        egui::StrokeKind::Middle,
+                    );
+                }
+                _ => {
+                    painter.line_segment([point(-6.0, -6.0), point(6.0, 6.0)], stroke);
+                    painter.line_segment([point(-6.0, 6.0), point(6.0, -6.0)], stroke);
+                }
+            }
+            if response.clicked() {
+                ui.ctx().send_viewport_cmd(command);
+            }
+            response.on_hover_text(label);
+        }
+    }
+
     fn import_document(&mut self, selection: Result<Option<PathBuf>, String>) {
         match selection.and_then(|path| path.as_deref().map(file_import::read).transpose()) {
             Ok(Some(document)) if document.trim().is_empty() => {
@@ -1217,7 +1415,7 @@ impl AutoTyper {
                         .fill(SURFACE)
                         .inner_margin(egui::Margin::symmetric(24, 14)),
                 )
-                .show(ui, |ui| centered_column(ui, |ui| self.actions(ui)));
+                .show(ui, |ui| document_column(ui, 0.0, |ui| self.actions(ui)));
         }
         egui::CentralPanel::default()
             .frame(
@@ -1226,13 +1424,46 @@ impl AutoTyper {
                     .inner_margin(egui::Margin::symmetric(24, 12)),
             )
             .show(ui, |ui| {
-                centered_column(ui, |ui| {
-                    if self.reading {
-                        self.reading_view(ui);
+                if self.reading {
+                    document_column(ui, 0.0, |ui| self.reading_view(ui));
+                } else {
+                    let fullscreen = ui.input(|input| {
+                        let viewport = input.viewport();
+                        viewport.maximized == Some(true) || viewport.fullscreen == Some(true)
+                    });
+                    let empty = self.text.is_empty();
+                    let (visibility, slide) = if !self.animate_drop {
+                        (
+                            if empty { 1.0 } else { 0.0 },
+                            if fullscreen && !empty { 1.0 } else { 0.0 },
+                        )
+                    } else if fullscreen {
+                        let progress = ui.ctx().animate_bool_with_time(
+                            ui.scope_id().with("maximized draft transition"),
+                            !empty,
+                            0.48,
+                        );
+                        // Collapse the drop zone before moving the draft horizontally.
+                        let reveal = (1.0 - 2.0 * progress).max(0.0);
+                        (
+                            reveal * reveal * (3.0 - 2.0 * reveal),
+                            (2.0 * progress - 1.0).max(0.0),
+                        )
                     } else {
-                        self.editor(ui);
-                    }
-                })
+                        (
+                            ui.ctx().animate_bool_with_time_and_easing(
+                                ui.scope_id().with("drop zone reveal"),
+                                empty,
+                                0.22,
+                                |progress| progress * progress * (3.0 - 2.0 * progress),
+                            ),
+                            0.0,
+                        )
+                    };
+                    let centered_counts =
+                        fullscreen.then(|| ui.available_rect_before_wrap().center().x);
+                    document_column(ui, slide, |ui| self.editor(ui, visibility, centered_counts));
+                }
             });
     }
 
@@ -1299,7 +1530,7 @@ impl AutoTyper {
         );
     }
 
-    fn editor(&mut self, ui: &mut egui::Ui) {
+    fn editor(&mut self, ui: &mut egui::Ui, visibility: f32, centered_counts: Option<f32>) {
         let enabled = self.active.is_none() && self.capture.is_none();
         let label = compact_row(ui, 52.0, |ui| {
             let label = ui.label(RichText::new("Draft").font(egui::FontId::new(
@@ -1329,18 +1560,6 @@ impl AutoTyper {
         ui.add_space(8.0);
         ui.add_enabled_ui(enabled, |ui| {
             let was_empty = self.text.is_empty();
-            let visibility = if self.animate_drop {
-                ui.ctx().animate_bool_with_time_and_easing(
-                    ui.id().with("drop zone reveal"),
-                    was_empty,
-                    0.22,
-                    |progress| progress * progress * (3.0 - 2.0 * progress),
-                )
-            } else if was_empty {
-                1.0
-            } else {
-                0.0
-            };
             let drop_zone = (visibility > 0.0).then(|| {
                 let height = (ui.available_height() * 0.43).clamp(68.0, 116.0);
                 let rect = egui::Rect::from_min_size(
@@ -1406,15 +1625,25 @@ impl AutoTyper {
             }
             let rule = if editor.inner.has_focus() { WHITE } else { BORDER };
             ui.painter().hline(editor.inner_rect.x_range(), editor.inner_rect.bottom() + 3.0, Stroke::new(1.0, rule));
-            compact_row(ui, 27.0, |ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!(
-                        "{} words  ·  {} characters",
-                        self.text.split_whitespace().count(),
-                        self.text.chars().count()
-                    )).weak().size(12.0));
+            let count = RichText::new(format!(
+                "{} words  ·  {} characters",
+                self.text.split_whitespace().count(),
+                self.text.chars().count()
+            )).weak().size(12.0);
+            if let Some(center_x) = centered_counts {
+                let (_, row) = ui.allocate_space(egui::vec2(ui.available_width(), 27.0));
+                let rect = row.translate(egui::vec2(center_x - row.center().x, 0.0));
+                let mut footer = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
+                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                ));
+                footer.label(count);
+            } else {
+                compact_row(ui, 27.0, |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(count);
+                    });
                 });
-            });
+            }
             if has_styles {
                 let mut preserve = !self.plain_text;
                 if ui.checkbox(&mut preserve, "Send bold & italic")
@@ -1692,11 +1921,12 @@ impl AutoTyper {
     }
 }
 
-fn centered_column(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+fn document_column(ui: &mut egui::Ui, slide: f32, add: impl FnOnce(&mut egui::Ui)) {
     let mut bounds = ui.available_rect_before_wrap();
-    let inset = ((bounds.width() - 540.0) * 0.5).max(0.0);
+    let width = bounds.width().min(540.0);
+    let inset = (bounds.width() - width) * 0.5 * (1.0 - slide);
     bounds.min.x += inset;
-    bounds.max.x -= inset;
+    bounds.max.x = bounds.min.x + width;
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(bounds)
@@ -1973,8 +2203,9 @@ fn setting_switch(ui: &mut egui::Ui, caption: &str, enabled: &mut bool) -> egui:
     response
 }
 
-fn blurred_backdrop(source: &egui::ColorImage) -> egui::ColorImage {
-    let [width, height] = source.size;
+fn blurred_backdrop(source: &egui::ColorImage, top: usize) -> egui::ColorImage {
+    let [width, full_height] = source.size;
+    let height = full_height.saturating_sub(top);
     if width == 0 || height == 0 {
         return egui::ColorImage::new([1, 1], vec![BLACK]);
     }
@@ -1987,7 +2218,7 @@ fn blurred_backdrop(source: &egui::ColorImage) -> egui::ColorImage {
             let (x0, y0) = (x * stride, y * stride);
             let (x1, y1) = ((x0 + stride).min(width), (y0 + stride).min(height));
             let mut sum = 0;
-            for sy in y0..y1 {
+            for sy in top + y0..top + y1 {
                 for pixel in &source.pixels[sy * width + x0..sy * width + x1] {
                     sum += usize::from(pixel.r());
                 }
@@ -2968,19 +3199,90 @@ mod tests {
     }
 
     #[test]
+    fn maximized_draft_rises_then_slides_left_while_counts_stay_centered() {
+        let ctx = egui::Context::default();
+        set_theme(&ctx);
+        let mut app = AutoTyper {
+            animate_drop: true,
+            ..Default::default()
+        };
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 850.0));
+        let frame = |app: &mut AutoTyper, tick: u32, draft: &str| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(f64::from(tick) / 60.0),
+                ..Default::default()
+            };
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .maximized = Some(true);
+            let output = ctx.run_ui(input, |ui| app.show(ui));
+            let text = |find: &dyn Fn(&str) -> bool| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|item| match &item.shape {
+                        egui::epaint::Shape::Text(text) if find(text.galley.text()) => Some(text),
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            let count = text(&|text| text.contains("characters"));
+            (
+                text(&|text| text == draft).pos,
+                text(&|text| text == "Draft").pos.x,
+                count.pos.x + count.galley.rect.center().x,
+            )
+        };
+
+        frame(&mut app, 0, "Type here");
+        let (empty, title, center) = frame(&mut app, 1, "Type here");
+        app.text.push("x", Style::default());
+        let collapse: Vec<_> = (2..=37).map(|tick| frame(&mut app, tick, "x")).collect();
+        let (early, early_title, _) = collapse[6];
+        let (mid, mid_title, _) = collapse[20];
+        let (filled, filled_title, _) = collapse[35];
+        assert!(early.y < empty.y - 10.0 && (early.x - empty.x).abs() <= 1.0);
+        assert!((early_title - title).abs() <= 1.0);
+        assert!((mid.y - filled.y).abs() <= 1.0 && filled.x < mid.x && mid.x < early.x);
+        assert!(filled_title < mid_title && mid_title < early_title);
+        assert!((collapse[21].0.x - mid.x - (mid.x - collapse[19].0.x)).abs() < 2.0);
+        assert!(collapse.iter().all(|&(_, _, x)| (x - center).abs() <= 1.0));
+
+        app.text = Document::default();
+        let reveal: Vec<_> = (38..=73)
+            .map(|tick| frame(&mut app, tick, "Type here"))
+            .collect();
+        assert!(filled.x < reveal[6].0.x && reveal[6].0.x < empty.x);
+        assert!((reveal[6].0.y - filled.y).abs() <= 1.0);
+        assert!((reveal[35].0 - empty).length() <= 1.0);
+        assert!(reveal.iter().all(|&(_, _, x)| (x - center).abs() <= 1.0));
+    }
+
+    #[test]
     fn backdrop_blurs_pixels_and_limits_texture_size() {
         let mut source = egui::ColorImage::new([7, 7], vec![BLACK; 49]);
         source.pixels[24] = WHITE;
-        let backdrop = blurred_backdrop(&source);
+        let backdrop = blurred_backdrop(&source, 0);
         assert_eq!(backdrop.size, [7, 7]);
         assert!((1..255).contains(&backdrop.pixels[24].r()));
         assert!(backdrop.pixels[23].r() > 0);
         assert_eq!(backdrop.pixels[0], BLACK);
 
         let wide = egui::ColorImage::new([600, 300], vec![BLACK; 600 * 300]);
-        let downsampled = blurred_backdrop(&wide);
+        let downsampled = blurred_backdrop(&wide, 0);
         assert_eq!(downsampled.size, [150, 75]);
         assert!(downsampled.pixels.iter().all(|&pixel| pixel == BLACK));
+    }
+
+    #[test]
+    fn backdrop_excludes_the_title_bar() {
+        let source = egui::ColorImage::new([2, 3], vec![WHITE, WHITE, BLACK, BLACK, BLACK, BLACK]);
+        let backdrop = blurred_backdrop(&source, 1);
+        assert_eq!(backdrop.size, [2, 2]);
+        assert!(backdrop.pixels.iter().all(|&pixel| pixel == BLACK));
     }
 
     fn planned(text: &str, timing: Timing) -> Result<Schedule, String> {

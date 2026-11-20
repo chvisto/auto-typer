@@ -380,6 +380,7 @@ dependencies = [
  "enigo",
  "html5ever",
  "rand",
+ "raw-window-handle",
  "roxmltree",
  "rwml",
  "serde",
