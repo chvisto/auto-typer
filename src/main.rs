@@ -2,8 +2,10 @@
 
 mod docx;
 mod file_import;
+mod mcp;
 mod rich_text;
 use std::{
+    collections::BTreeMap,
     env, fs, io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     path::PathBuf,
@@ -49,6 +51,15 @@ const RESUME_HOTKEY: i32 = 2;
 const TEXT_EDITOR: &str = "autotyper document";
 
 fn main() -> eframe::Result {
+    let agent = if env::args_os().nth(1).is_some_and(|arg| arg == "--mcp") {
+        let Some(session) = mcp::Session::start().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?
+        else {
+            return Ok(());
+        };
+        Some(session)
+    } else {
+        None
+    };
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/autotyper.png"))
         .expect("the bundled AutoTyper icon must be a valid PNG");
     let options = eframe::NativeOptions {
@@ -59,9 +70,12 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "AutoTyper",
+        if agent.is_some() { "AutoTyper · MCP" } else { "AutoTyper" },
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
+            if let Some(session) = &agent {
+                session.wake_with(cc.egui_ctx.clone());
+            }
             set_theme(&cc.egui_ctx);
             let mut animate = 0i32;
             // SAFETY: this query writes a Win32 BOOL into the supplied buffer.
@@ -74,6 +88,7 @@ fn main() -> eframe::Result {
                 )
             };
             Ok(Box::new(AutoTyper {
+                agent,
                 animate_drop: allowed != 0 && animate != 0,
                 ..Default::default()
             }))
@@ -160,19 +175,23 @@ fn emphasis(text: impl Into<String>, size: f32) -> RichText {
     ))
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum TimingMode {
     Wpm,
     Duration,
     FinishAt,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Pause {
     enabled: bool,
     seconds: f64,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Options {
     mode: TimingMode,
     wpm: u32,
@@ -679,6 +698,7 @@ enum Status {
 enum Update {
     Status(Status),
     Progress(usize),
+    Paragraph(usize, Timing),
     Timing(Result<Timing, String>),
 }
 
@@ -803,9 +823,33 @@ fn signal(event: &OwnedHandle) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct RunParagraph {
+    end: usize,
+    timing: Timing,
+}
+
+#[derive(Clone, Copy)]
+struct TimingEdit {
+    paragraph: Option<usize>,
+    timing: Timing,
+}
+
+fn paragraph_ends(text: &[char]) -> Vec<usize> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let end = text.iter().rposition(|&ch| ch != '\n').map_or(0, |i| i + 1);
+    (1..end)
+        .filter(|&i| text[i] == '\n' && text[i - 1] != '\n')
+        .chain(std::iter::once(text.len()))
+        .collect()
+}
+
 struct ActiveRun {
     events: Arc<Events>,
-    changes: mpsc::Sender<Timing>,
+    changes: mpsc::Sender<TimingEdit>,
+    paragraph_count: usize,
     updates: mpsc::Receiver<Update>,
 }
 
@@ -825,6 +869,9 @@ enum DropPulse {
 
 #[derive(Default)]
 struct AutoTyper {
+    agent: Option<mcp::Session>,
+    paragraph_settings: BTreeMap<usize, Options>,
+    running_paragraph: usize,
     text: Document,
     animate_drop: bool,
     drop_pulse: DropPulse,
@@ -889,7 +936,20 @@ impl AutoTyper {
         }
         let styles =
             (!self.plain_text && self.text.has_styles()).then(|| self.text.styles().to_vec());
-        let timing = self.options.timing(Local::now())?;
+        let wall_now = Local::now();
+        let default = self.options.timing(wall_now)?;
+        let ends = if self.paragraph_settings.is_empty() {
+            vec![text.len()]
+        } else {
+            paragraph_ends(&text)
+        };
+        let plan = ends.into_iter().enumerate().map(|(index, end)| {
+            let timing = self.paragraph_settings.get(&index)
+                .map_or(Ok(default), |options| options.timing(wall_now))?;
+            Ok(RunParagraph { end, timing })
+        }).collect::<Result<Vec<_>, String>>()?;
+        let timing = plan[0].timing;
+        let paragraph_count = plan.len();
         let countdown = Duration::from_secs(u64::from(self.options.countdown));
         let events =
             Arc::new(Events::new().map_err(|error| format!("Could not start typing. {error}"))?);
@@ -908,7 +968,7 @@ impl AutoTyper {
                 let result = run_job(
                     &text,
                     styles.as_deref(),
-                    timing,
+                    plan,
                     countdown,
                     &worker_events,
                     &worker_changes,
@@ -925,7 +985,9 @@ impl AutoTyper {
             events,
             changes,
             updates,
+            paragraph_count,
         });
+        self.running_paragraph = 0;
         self.applied_timing = Some(timing);
         self.timing_feedback = None;
         self.timing_open = false;
@@ -936,14 +998,19 @@ impl AutoTyper {
     }
 
     fn apply_timing(&mut self) {
-        let Some(run) = &self.active else { return };
+        if self.active.is_none() {
+            return;
+        }
         let result = self.options.timing(Local::now()).and_then(|timing| {
-            run.changes
-                .send(timing)
-                .map_err(|_| "The run has ended.".to_owned())?;
-            signal(&run.events.timing).map_err(|error| format!("Could not apply timing. {error}"))
+            self.send_timing(TimingEdit { paragraph: None, timing })
         });
         self.timing_feedback = result.err().map(Err);
+    }
+
+    fn send_timing(&self, change: TimingEdit) -> Result<(), String> {
+        let run = self.active.as_ref().ok_or("The run has ended.")?;
+        run.changes.send(change).map_err(|_| "The run has ended.")?;
+        signal(&run.events.timing).map_err(|error| format!("Could not apply timing. {error}"))
     }
 }
 
@@ -1010,6 +1077,10 @@ impl eframe::App for AutoTyper {
             loop {
                 match run.updates.try_recv() {
                     Ok(Update::Progress(sent)) => self.sent = sent,
+                    Ok(Update::Paragraph(index, timing)) => {
+                        self.running_paragraph = index;
+                        self.applied_timing = Some(timing);
+                    }
                     Ok(Update::Timing(result)) => {
                         self.timing_feedback = Some(result.map(|timing| {
                             self.applied_timing = Some(timing);
@@ -1045,6 +1116,14 @@ impl eframe::App for AutoTyper {
                 }
             }
         }
+        if let Some(mut agent) = self.agent.take() {
+            if agent.process(self, ctx) {
+                self.agent = Some(agent);
+            } else {
+                self.active = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
         if matches!(self.status, Status::Countdown(_)) {
             ctx.request_repaint_after(Duration::from_millis(40));
         } else if self.options.mode == TimingMode::FinishAt
@@ -1078,6 +1157,7 @@ impl AutoTyper {
             }
             Ok(Some(document)) => {
                 self.text.append_document(document);
+                self.paragraph_settings.clear();
                 self.status = Status::Ready;
             }
             Ok(None) => {}
@@ -1270,6 +1350,9 @@ impl AutoTyper {
                         .layouter(&mut layouter))
                         .labelled_by(label)
                 });
+            if editor.inner.changed() {
+                self.paragraph_settings.clear();
+            }
             self.update_drop_pulse(was_empty, editor.inner.gained_focus() || editor.inner.clicked());
             if let Some(rect) = drop_zone {
                 self.drop_zone(ui, rect);
@@ -1973,14 +2056,18 @@ impl Fatigue {
 }
 
 fn run_job(
-    text: &[char],
+    all_text: &[char],
     styles: Option<&[Style]>,
-    mut timing: Timing,
+    mut plan: Vec<RunParagraph>,
     countdown: Duration,
     events: &Events,
-    changes: &mpsc::Receiver<Timing>,
+    changes: &mpsc::Receiver<TimingEdit>,
     report: impl Fn(Update),
 ) -> Result<bool, String> {
+    let mut chunk = 0;
+    let mut offset = 0;
+    let mut text = &all_text[..plan[0].end];
+    let mut timing = plan[0].timing;
     let mut escape = Some(Hotkey::escape()?);
     let mut enigo = Enigo::new(&Settings::default())
         .map_err(|error| format!("Could not initialize keyboard input. {error}"))?;
@@ -2095,7 +2182,19 @@ fn run_job(
             }
             Wait::Pause => continue,
             Wait::Timing => {
-                if let Some(requested) = changes.try_iter().last() {
+                for change in changes.try_iter() {
+                    let index = change.paragraph.unwrap_or(chunk);
+                    if index > chunk {
+                        if let Some(section) = plan.get_mut(index) {
+                            section.timing = change.timing;
+                        }
+                        continue;
+                    }
+                    if index < chunk {
+                        report(Update::Timing(Err("That paragraph has already finished.".into())));
+                        continue;
+                    }
+                    let requested = change.timing;
                     if requested.natural_writing {
                         natural.get_or_insert_with(|| natural_cadence(text, rand::random::<f64>));
                     }
@@ -2284,7 +2383,7 @@ fn run_job(
 
         let ch = text[sent];
         if let Some(styles) = styles {
-            let mut style = styles[sent];
+            let mut style = styles[offset + sent];
             if let Some(editor) = editor {
                 if ch != '\n'
                     && (sent == 0 || text[sent - 1] == '\n')
@@ -2335,8 +2434,31 @@ fn run_job(
         previous = Some((sent, Instant::now()));
         sent += 1;
         next += 1;
-        report(Update::Progress(sent));
-        if phase_changed && sent < text.len() {
+        report(Update::Progress(offset + sent));
+        if sent == text.len() && chunk + 1 < plan.len() {
+            offset += sent;
+            chunk += 1;
+            text = &all_text[offset..plan[chunk].end];
+            timing = plan[chunk].timing;
+            natural = timing.natural_writing.then(|| natural_cadence(text, rand::random::<f64>));
+            started = Instant::now();
+            previous = None;
+            sent = 0;
+            next = 0;
+            thinking_left = timing.thinking.map(|_| next_thinking_interval());
+            fatigue = (timing.pace.exhaustion_reduction() > 0).then(|| Fatigue::new(false));
+            schedule = Schedule::plan(
+                text,
+                natural.as_deref().unwrap_or_default(),
+                timing,
+                started,
+                started,
+                SystemTime::now(),
+                previous,
+                false,
+            )?;
+            report(Update::Paragraph(chunk, timing));
+        } else if phase_changed && sent < text.len() {
             schedule = Schedule::plan(
                 text,
                 natural.as_deref().unwrap_or_default(),
