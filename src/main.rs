@@ -1329,17 +1329,34 @@ impl AutoTyper {
         ui.add_space(8.0);
         ui.add_enabled_ui(enabled, |ui| {
             let was_empty = self.text.is_empty();
-            let drop_zone = was_empty.then(|| {
+            let visibility = if self.animate_drop {
+                ui.ctx().animate_bool_with_time_and_easing(
+                    ui.id().with("drop zone reveal"),
+                    was_empty,
+                    0.22,
+                    |progress| progress * progress * (3.0 - 2.0 * progress),
+                )
+            } else if was_empty {
+                1.0
+            } else {
+                0.0
+            };
+            let drop_zone = (visibility > 0.0).then(|| {
                 let height = (ui.available_height() * 0.43).clamp(68.0, 116.0);
-                let (rect, response) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), height),
-                    egui::Sense::click(),
+                let rect = egui::Rect::from_min_size(
+                    ui.available_rect_before_wrap().min,
+                    egui::vec2(ui.available_width(), height * visibility),
                 );
-                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Open file")
+                let response = was_empty.then(|| {
+                    let response = ui
+                        .interact(rect, ui.id().with("open file"), egui::Sense::click())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Open file")
+                    });
+                    response
                 });
-                ui.add_space(9.0);
+                ui.add_space((height + 9.0 + ui.spacing().item_spacing.y) * visibility);
                 (rect, response)
             });
             let has_styles = self.text.has_styles();
@@ -1372,9 +1389,18 @@ impl AutoTyper {
                 self.paragraph_settings.clear();
             }
             self.update_drop_pulse(was_empty, editor.inner.gained_focus() || editor.inner.clicked());
+            if was_empty != self.text.is_empty() {
+                ui.ctx().request_repaint();
+            }
             if let Some((rect, response)) = drop_zone {
-                self.drop_zone(ui, rect, response.hovered() || response.has_focus());
-                if response.clicked() {
+                let mut panel = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                panel.set_clip_rect(ui.clip_rect().intersect(rect));
+                panel.multiply_opacity(visibility);
+                let highlighted = response
+                    .as_ref()
+                    .is_some_and(|response| response.hovered() || response.has_focus());
+                self.drop_zone(&mut panel, rect, highlighted);
+                if response.is_some_and(|response| response.clicked()) {
                     self.import_document(file_import::choose(foreground_window()));
                 }
             }
@@ -1418,7 +1444,7 @@ impl AutoTyper {
         });
         let highlighted = highlighted || file_hover;
         let mut brightness = 75;
-        if self.animate_drop && focused && !highlighted {
+        if self.animate_drop && focused && !highlighted && self.text.is_empty() {
             if matches!(self.drop_pulse, DropPulse::Ready) {
                 self.drop_pulse = DropPulse::Running(now);
             }
@@ -1457,7 +1483,7 @@ impl AutoTyper {
                 .layout(egui::Layout::top_down(egui::Align::Center)),
         );
         content.spacing_mut().item_spacing.y = 3.0;
-        content.add_space((rect.height() - 52.0) * 0.5);
+        content.add_space((rect.height() - 52.0).max(0.0) * 0.5);
         content.add(egui::Label::new(emphasis("Drag and drop a file", 16.0)).selectable(false));
         for label in [".doc, .docx, .txt", "Ctrl + O to open"] {
             content.add(
@@ -2892,6 +2918,45 @@ mod tests {
         ctx.run_ui(clear, |ui| app.show(ui));
         assert!(app.text.is_empty());
         assert!(matches!(app.drop_pulse, DropPulse::Ready));
+    }
+
+    #[test]
+    fn draft_slides_through_intermediate_positions_in_both_directions() {
+        let ctx = egui::Context::default();
+        set_theme(&ctx);
+        let mut app = AutoTyper {
+            animate_drop: true,
+            ..Default::default()
+        };
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(684.0, 520.0));
+        let frame = |app: &mut AutoTyper, tick: u32, label: &str| {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(f64::from(tick) / 60.0),
+                    ..Default::default()
+                },
+                |ui| app.show(ui),
+            );
+            output.shapes.iter().find_map(|item| match &item.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == label => Some(text.pos.y),
+                _ => None,
+            }).expect("draft text should be visible")
+        };
+
+        frame(&mut app, 0, "Type here");
+        let empty_y = frame(&mut app, 1, "Type here");
+        app.text.push("x", Style::default());
+        let collapse: Vec<_> = (2..=20).map(|tick| frame(&mut app, tick, "x")).collect();
+        let filled_y = collapse[18];
+        assert!(collapse.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert!(filled_y + 50.0 < collapse[5] && collapse[5] < empty_y - 10.0);
+
+        app.text = Document::default();
+        let reveal: Vec<_> = (21..=39).map(|tick| frame(&mut app, tick, "Type here")).collect();
+        assert!(reveal.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(filled_y + 10.0 < reveal[5] && reveal[5] < empty_y - 10.0);
+        assert!((reveal[18] - empty_y).abs() <= 1.0);
     }
 
     #[test]
