@@ -280,9 +280,9 @@ enum TimingMode {
 
 #[derive(Clone, Copy, Default, PartialEq)]
 enum DurationUnit {
-    #[default]
     Seconds,
     Minutes,
+    #[default]
     Hours,
 }
 
@@ -332,7 +332,7 @@ impl Default for Options {
         Self {
             mode: TimingMode::Wpm,
             wpm: 65,
-            total_seconds: 60.0,
+            total_seconds: 3_600.0,
             finish_at: String::new(),
             countdown: 4,
             natural_writing: false,
@@ -3160,11 +3160,11 @@ mod tests {
                 },
             )
         };
-        let mut seconds = 3_600.0;
+        let mut seconds = Options::default().total_seconds;
         for (mut unit, display) in [
+            (DurationUnit::default(), "1"),
             (DurationUnit::Seconds, "3600.0"),
             (DurationUnit::Minutes, "60"),
-            (DurationUnit::Hours, "1"),
         ] {
             let output = frame(&mut seconds, &mut unit, vec![]);
             assert!(output.shapes.iter().any(|item| {
