@@ -1432,37 +1432,26 @@ impl AutoTyper {
                         viewport.maximized == Some(true) || viewport.fullscreen == Some(true)
                     });
                     let empty = self.text.is_empty();
-                    let (visibility, slide) = if !self.animate_drop {
-                        (
-                            if empty { 1.0 } else { 0.0 },
-                            if fullscreen && !empty { 1.0 } else { 0.0 },
+                    let visibility = if self.animate_drop {
+                        let (animation, duration) = if fullscreen {
+                            ("maximized draft transition", 0.48)
+                        } else {
+                            ("drop zone reveal", 0.22)
+                        };
+                        ui.ctx().animate_bool_with_time_and_easing(
+                            ui.scope_id().with(animation),
+                            empty,
+                            duration,
+                            |progress| progress * progress * (3.0 - 2.0 * progress),
                         )
-                    } else if fullscreen {
-                        let progress = ui.ctx().animate_bool_with_time(
-                            ui.scope_id().with("maximized draft transition"),
-                            !empty,
-                            0.48,
-                        );
-                        // Collapse the drop zone before moving the draft horizontally.
-                        let reveal = (1.0 - 2.0 * progress).max(0.0);
-                        (
-                            reveal * reveal * (3.0 - 2.0 * reveal),
-                            (2.0 * progress - 1.0).max(0.0),
-                        )
+                    } else if empty {
+                        1.0
                     } else {
-                        (
-                            ui.ctx().animate_bool_with_time_and_easing(
-                                ui.scope_id().with("drop zone reveal"),
-                                empty,
-                                0.22,
-                                |progress| progress * progress * (3.0 - 2.0 * progress),
-                            ),
-                            0.0,
-                        )
+                        0.0
                     };
-                    let centered_counts =
-                        fullscreen.then(|| ui.available_rect_before_wrap().center().x);
-                    document_column(ui, slide, |ui| self.editor(ui, visibility, centered_counts));
+                    let slide = if fullscreen { 1.0 - visibility } else { 0.0 };
+                    let workspace = fullscreen.then(|| ui.available_rect_before_wrap().x_range());
+                    document_column(ui, slide, |ui| self.editor(ui, visibility, workspace));
                 }
             });
     }
@@ -1530,7 +1519,7 @@ impl AutoTyper {
         );
     }
 
-    fn editor(&mut self, ui: &mut egui::Ui, visibility: f32, centered_counts: Option<f32>) {
+    fn editor(&mut self, ui: &mut egui::Ui, visibility: f32, workspace: Option<egui::Rangef>) {
         let enabled = self.active.is_none() && self.capture.is_none();
         let label = compact_row(ui, 52.0, |ui| {
             let label = ui.label(RichText::new("Draft").font(egui::FontId::new(
@@ -1560,6 +1549,7 @@ impl AutoTyper {
         ui.add_space(8.0);
         ui.add_enabled_ui(enabled, |ui| {
             let was_empty = self.text.is_empty();
+            let column_width = ui.available_width();
             let drop_zone = (visibility > 0.0).then(|| {
                 let height = (ui.available_height() * 0.43).clamp(68.0, 116.0);
                 let rect = egui::Rect::from_min_size(
@@ -1624,15 +1614,18 @@ impl AutoTyper {
                 }
             }
             let rule = if editor.inner.has_focus() { WHITE } else { BORDER };
-            ui.painter().hline(editor.inner_rect.x_range(), editor.inner_rect.bottom() + 3.0, Stroke::new(1.0, rule));
+            let divider = workspace.map_or(editor.inner_rect.x_range(), |workspace| {
+                workspace.shrink((workspace.span() - column_width) * 0.5 * visibility)
+            });
+            ui.painter().hline(divider, editor.inner_rect.bottom() + 3.0, Stroke::new(1.0, rule));
             let count = RichText::new(format!(
                 "{} words  ·  {} characters",
                 self.text.split_whitespace().count(),
                 self.text.chars().count()
             )).weak().size(12.0);
-            if let Some(center_x) = centered_counts {
+            if let Some(workspace) = workspace {
                 let (_, row) = ui.allocate_space(egui::vec2(ui.available_width(), 27.0));
-                let rect = row.translate(egui::vec2(center_x - row.center().x, 0.0));
+                let rect = row.translate(egui::vec2(workspace.center() - row.center().x, 0.0));
                 let mut footer = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(
                     egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                 ));
@@ -3199,7 +3192,7 @@ mod tests {
     }
 
     #[test]
-    fn maximized_draft_rises_then_slides_left_while_counts_stay_centered() {
+    fn maximized_draft_moves_diagonally_and_divider_expands_from_the_center() {
         let ctx = egui::Context::default();
         set_theme(&ctx);
         let mut app = AutoTyper {
@@ -3230,35 +3223,54 @@ mod tests {
                     .unwrap()
             };
             let count = text(&|text| text.contains("characters"));
+            let divider = output
+                .shapes
+                .iter()
+                .find_map(|item| match &item.shape {
+                    egui::epaint::Shape::LineSegment {
+                        points: [left, right],
+                        stroke,
+                    } if left.y == right.y && left.y > 750.0 && stroke.color == BORDER => {
+                        Some(egui::Rangef::new(left.x, right.x))
+                    }
+                    _ => None,
+                })
+                .expect("editor divider should be visible");
             (
                 text(&|text| text == draft).pos,
                 text(&|text| text == "Draft").pos.x,
                 count.pos.x + count.galley.rect.center().x,
+                divider,
             )
         };
 
         frame(&mut app, 0, "Type here");
-        let (empty, title, center) = frame(&mut app, 1, "Type here");
+        let (empty, title, center, empty_line) = frame(&mut app, 1, "Type here");
         app.text.push("x", Style::default());
         let collapse: Vec<_> = (2..=37).map(|tick| frame(&mut app, tick, "x")).collect();
-        let (early, early_title, _) = collapse[6];
-        let (mid, mid_title, _) = collapse[20];
-        let (filled, filled_title, _) = collapse[35];
-        assert!(early.y < empty.y - 10.0 && (early.x - empty.x).abs() <= 1.0);
-        assert!((early_title - title).abs() <= 1.0);
-        assert!((mid.y - filled.y).abs() <= 1.0 && filled.x < mid.x && mid.x < early.x);
-        assert!(filled_title < mid_title && mid_title < early_title);
-        assert!((collapse[21].0.x - mid.x - (mid.x - collapse[19].0.x)).abs() < 2.0);
-        assert!(collapse.iter().all(|&(_, _, x)| (x - center).abs() <= 1.0));
+        let (early, _, _, early_line) = collapse[6];
+        let (filled, _, _, filled_line) = collapse[35];
+        assert!(filled.x < early.x && early.x < empty.x - 10.0);
+        assert!(filled.y < early.y && early.y < empty.y - 10.0);
+        assert!(filled_line.min < early_line.min && early_line.min < empty_line.min);
+        assert!(empty_line.max < early_line.max && early_line.max < filled_line.max);
 
         app.text = Document::default();
         let reveal: Vec<_> = (38..=73)
             .map(|tick| frame(&mut app, tick, "Type here"))
             .collect();
         assert!(filled.x < reveal[6].0.x && reveal[6].0.x < empty.x);
-        assert!((reveal[6].0.y - filled.y).abs() <= 1.0);
+        assert!(filled.y < reveal[6].0.y && reveal[6].0.y < empty.y);
         assert!((reveal[35].0 - empty).length() <= 1.0);
-        assert!(reveal.iter().all(|&(_, _, x)| (x - center).abs() <= 1.0));
+        assert_eq!(reveal[35].3, empty_line);
+
+        for &(draft, heading, count, divider) in collapse.iter().chain(&reveal) {
+            let progress = (draft.x - empty.x) / (filled.x - empty.x);
+            assert!((draft.y - egui::lerp(empty.y..=filled.y, progress)).abs() <= 2.0);
+            assert!((heading - title - (draft.x - empty.x)).abs() <= 1.0);
+            assert!((count - center).abs() <= 1.0);
+            assert!((divider.center() - center).abs() <= 1.0);
+        }
     }
 
     #[test]
