@@ -1615,7 +1615,7 @@ impl AutoTyper {
             }
             let rule = if editor.inner.has_focus() { WHITE } else { BORDER };
             let divider = workspace.map_or(editor.inner_rect.x_range(), |workspace| {
-                workspace.shrink((workspace.span() - column_width) * 0.5 * visibility)
+                workspace.shrink((workspace.span() - column_width) * 0.5)
             });
             ui.painter().hline(divider, editor.inner_rect.bottom() + 3.0, Stroke::new(1.0, rule));
             let count = RichText::new(format!(
@@ -1916,10 +1916,9 @@ impl AutoTyper {
 
 fn document_column(ui: &mut egui::Ui, slide: f32, add: impl FnOnce(&mut egui::Ui)) {
     let mut bounds = ui.available_rect_before_wrap();
-    let width = bounds.width().min(540.0);
-    let inset = (bounds.width() - width) * 0.5 * (1.0 - slide);
+    let inset = (bounds.width() - 540.0).max(0.0) * 0.5 * (1.0 - slide);
     bounds.min.x += inset;
-    bounds.max.x = bounds.min.x + width;
+    bounds.max.x -= inset;
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(bounds)
@@ -3236,27 +3235,35 @@ mod tests {
                     _ => None,
                 })
                 .expect("editor divider should be visible");
+            let body = text(&|text| text == draft);
             (
-                text(&|text| text == draft).pos,
+                body.pos,
                 text(&|text| text == "Draft").pos.x,
                 count.pos.x + count.galley.rect.center().x,
                 divider,
+                body.galley.rows.len(),
             )
         };
 
         frame(&mut app, 0, "Type here");
-        let (empty, title, center, empty_line) = frame(&mut app, 1, "Type here");
+        let (empty, title, center, empty_line, _) = frame(&mut app, 1, "Type here");
         app.text.push("x", Style::default());
         let collapse: Vec<_> = (2..=37).map(|tick| frame(&mut app, tick, "x")).collect();
-        let (early, _, _, early_line) = collapse[6];
-        let (filled, _, _, filled_line) = collapse[35];
+        let (early, _, _, early_line, _) = collapse[6];
+        let (filled, _, _, filled_line, _) = collapse[35];
         assert!(filled.x < early.x && early.x < empty.x - 10.0);
         assert!(filled.y < early.y && early.y < empty.y - 10.0);
         assert!(filled_line.min < early_line.min && early_line.min < empty_line.min);
         assert!(empty_line.max < early_line.max && early_line.max < filled_line.max);
 
+        // A line wider than the compact column should fit in the expanded editor.
+        let long_line = "W".repeat(48);
         app.text = Document::default();
-        let reveal: Vec<_> = (38..=73)
+        app.text.push(&long_line, Style::default());
+        assert_eq!(frame(&mut app, 38, &long_line).4, 1);
+
+        app.text = Document::default();
+        let reveal: Vec<_> = (39..=74)
             .map(|tick| frame(&mut app, tick, "Type here"))
             .collect();
         assert!(filled.x < reveal[6].0.x && reveal[6].0.x < empty.x);
@@ -3264,7 +3271,7 @@ mod tests {
         assert!((reveal[35].0 - empty).length() <= 1.0);
         assert_eq!(reveal[35].3, empty_line);
 
-        for &(draft, heading, count, divider) in collapse.iter().chain(&reveal) {
+        for &(draft, heading, count, divider, _) in collapse.iter().chain(&reveal) {
             let progress = (draft.x - empty.x) / (filled.x - empty.x);
             assert!((draft.y - egui::lerp(empty.y..=filled.y, progress)).abs() <= 2.0);
             assert!((heading - title - (draft.x - empty.x)).abs() <= 1.0);
