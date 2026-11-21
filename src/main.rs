@@ -407,9 +407,14 @@ impl Options {
 
 fn next_finish<Tz: TimeZone>(input: &str, now: DateTime<Tz>) -> Result<DateTime<Tz>, String> {
     let input = input.trim();
-    let time = NaiveTime::parse_from_str(input, "%H:%M:%S")
-        .or_else(|_| NaiveTime::parse_from_str(input, "%H:%M"))
-        .map_err(|_| "Enter a 24-hour time such as 17:30:00.".to_owned())?;
+    let parse = |text: &str| {
+        NaiveTime::parse_from_str(text, "%H:%M:%S")
+            .or_else(|_| NaiveTime::parse_from_str(text, "%H:%M"))
+            .ok()
+    };
+    let time = parse(input)
+        .or_else(|| format_finish_input(input, true).and_then(|time| parse(&time)))
+        .ok_or_else(|| "Enter a 24-hour time such as 17:30:00.".to_owned())?;
     let today = now.date_naive();
     let zone = now.timezone();
     for day in [Some(today), today.succ_opt()].into_iter().flatten() {
@@ -423,6 +428,68 @@ fn next_finish<Tz: TimeZone>(input: &str, now: DateTime<Tz>) -> Result<DateTime<
         }
     }
     Err("That time is unavailable. Choose a different finish time.".into())
+}
+
+fn format_finish_input(input: &str, complete: bool) -> Option<String> {
+    let input = input.trim();
+    if input.is_empty()
+        || input.len() > 8
+        || !input
+            .bytes()
+            .all(|c| c.is_ascii_digit() || matches!(c, b':' | b'/'))
+    {
+        return None;
+    }
+    let parts: Vec<_> = if !input.contains([':', '/']) && input.len() > 2 {
+        if input.len() > 6 {
+            return None;
+        }
+        let hours = 2 - input.len() % 2;
+        let (hour, rest) = input.split_at(hours);
+        let (minute, second) = rest.split_at(2);
+        if second.is_empty() {
+            vec![hour, minute]
+        } else {
+            vec![hour, minute, second]
+        }
+    } else {
+        input.split([':', '/']).collect()
+    };
+    if parts.len() > 3 {
+        return None;
+    }
+
+    let mut result = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        let last = index + 1 == parts.len();
+        if last && part.is_empty() && index > 0 {
+            if !complete {
+                result.push(':');
+            }
+            break;
+        }
+        let value = part.parse::<u8>().ok()?;
+        let limit = if index == 0 { 23 } else { 59 };
+        if part.len() > 2 || value > limit {
+            return None;
+        }
+        let ready =
+            complete || !last || part.len() == 2 || u16::from(value) * 10 > u16::from(limit);
+        if index > 0 {
+            result.push(':');
+        }
+        if ready && value < 10 && part.len() == 1 {
+            result.push('0');
+        }
+        result.push_str(part);
+        if last && ready && !complete && index < 2 {
+            result.push(':');
+        }
+    }
+    if complete && !result.contains(':') {
+        result.push_str(":00");
+    }
+    Some(result)
 }
 
 #[derive(Clone, Copy)]
@@ -2040,7 +2107,17 @@ fn pace_field(
         TimingMode::Duration => "Typing time",
         TimingMode::FinishAt => "Local time",
     };
-    let label = ui.label(RichText::new(caption).weak());
+    let label = if large && options.mode == TimingMode::FinishAt {
+        compact_row(ui, 18.0, |ui| {
+            let label = ui.label(RichText::new(caption).weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new("24-hour").weak().size(11.0));
+            });
+            label
+        })
+    } else {
+        ui.label(RichText::new(caption).weak())
+    };
     let response = ui
         .scope(|ui| {
             let font = egui::FontId::new(29.0, egui::FontFamily::Name(DISPLAY.into()));
@@ -2060,20 +2137,71 @@ fn pace_field(
                 TimingMode::Duration => {
                     duration_field(ui, &mut options.total_seconds, duration_unit)
                 }
-                TimingMode::FinishAt => ui.add(
-                    egui::TextEdit::singleline(&mut options.finish_at)
-                        .desired_width(104.0)
-                        .font(egui::FontId::monospace(14.0))
-                        .background_color(SURFACE)
-                        .hint_text("HH:MM:SS"),
-                ),
+                TimingMode::FinishAt => finish_time_field(ui, &mut options.finish_at, large),
             }
         })
         .inner;
     response.labelled_by(label.id);
     if large {
+        if options.mode == TimingMode::FinishAt {
+            ui.add_space(3.0);
+        }
         clock_hint(ui, options);
     }
+}
+
+fn finish_time_field(ui: &mut egui::Ui, value: &mut String, large: bool) -> egui::Response {
+    let (typed, pasted) = ui.input(|input| {
+        (
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Text(_))),
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Paste(_))),
+        )
+    });
+    let mut edit = egui::TextEdit::singleline(value)
+        .desired_width(if large { f32::INFINITY } else { 104.0 })
+        .font(egui::FontId::monospace(if large { 22.0 } else { 14.0 }))
+        .margin(if large {
+            egui::Margin::symmetric(12, 8)
+        } else {
+            egui::Margin::symmetric(6, 3)
+        })
+        .background_color(BLACK)
+        .hint_text("HH:MM")
+        .show(ui);
+    let appended = edit.response.changed()
+        && (typed || pasted)
+        && edit.cursor_range.is_some_and(|cursor| {
+            cursor.primary.index == egui::text::CharIndex(value.chars().count())
+        });
+    let complete = edit.response.lost_focus() || pasted;
+    if appended || edit.response.lost_focus() {
+        let redundant_separator = appended && (value.ends_with("::") || value.ends_with(":/"));
+        let input = if redundant_separator {
+            &value[..value.len() - 1]
+        } else {
+            value.as_str()
+        };
+        if let Some(formatted) = format_finish_input(input, complete)
+            && formatted != *value
+        {
+            *value = formatted;
+            let end = egui::text::CCursor::new(value.len());
+            edit.state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(end)));
+            edit.state.store(ui.ctx(), edit.response.id);
+            ui.ctx().request_repaint();
+        }
+    }
+    edit.response.response.on_hover_text(
+        "Type digits for hours, minutes and optional seconds. Colons are added as you type.",
+    )
 }
 
 fn duration_field(ui: &mut egui::Ui, seconds: &mut f64, unit: &mut DurationUnit) -> egui::Response {
@@ -2131,10 +2259,17 @@ fn clock_hint(ui: &mut egui::Ui, options: &Options) {
                     1000 - u64::from(now.timestamp_subsec_millis()),
                 ));
             }
-            format!("Now · {}", now.format("%H:%M:%S"))
+            format!("PC clock · {}", now.format("%H:%M:%S"))
         } else {
             match next_finish(&options.finish_at, now) {
-                Ok(time) => time.format("%a, %b %e  ·  %H:%M:%S local").to_string(),
+                Ok(time) => {
+                    let day = if time.date_naive() == now.date_naive() {
+                        "Today"
+                    } else {
+                        "Tomorrow"
+                    };
+                    format!("{day} · {}", time.format("%H:%M:%S"))
+                }
                 Err(message) => message,
             }
         };
@@ -3120,6 +3255,10 @@ mod tests {
                             "Start typing",
                         ]
                         .into_iter()
+                        .chain((mode == TimingMode::FinishAt).then_some("HH:MM"))
+                        .chain(
+                            (mode == TimingMode::FinishAt && size[0] >= 600.0).then_some("24-hour"),
+                        )
                         .chain(formatted.then_some("Send bold & italic"))
                         .chain(text.is_empty().then_some("Drag and drop a file"))
                         .chain(text.is_empty().then_some("Type here"))
@@ -3143,6 +3282,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn finish_time_entry_inserts_colons_and_accepts_short_fields() {
+        for (input, complete, expected) in [
+            ("00", false, "00:"),
+            ("0/", false, "00:"),
+            ("7", false, "07:"),
+            ("7:5", true, "07:05"),
+            ("00:09:", true, "00:09"),
+            ("0", true, "00:00"),
+            ("730", true, "07:30"),
+            ("235901", true, "23:59:01"),
+        ] {
+            assert_eq!(
+                format_finish_input(input, complete).as_deref(),
+                Some(expected)
+            );
+        }
+        assert!(format_finish_input("24:00", true).is_none());
+        assert!(format_finish_input("12:60", true).is_none());
+
+        let ctx = egui::Context::default();
+        let mut value = String::new();
+        let id = std::cell::Cell::new(egui::Id::NULL);
+        let frame = |value: &mut String, events| {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    id.set(finish_time_field(ui, value, true).id);
+                },
+            );
+        };
+        frame(&mut value, vec![]);
+        ctx.memory_mut(|memory| memory.request_focus(id.get()));
+        for key in ["1", "2", "0", "9", "0", "8"] {
+            frame(&mut value, vec![egui::Event::Text(key.into())]);
+        }
+        assert_eq!(value, "12:09:08");
     }
 
     #[test]
