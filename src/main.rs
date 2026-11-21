@@ -278,6 +278,32 @@ enum TimingMode {
     FinishAt,
 }
 
+#[derive(Clone, Copy, Default, PartialEq)]
+enum DurationUnit {
+    #[default]
+    Seconds,
+    Minutes,
+    Hours,
+}
+
+impl DurationUnit {
+    fn seconds(self) -> f64 {
+        match self {
+            Self::Seconds => 1.0,
+            Self::Minutes => 60.0,
+            Self::Hours => 3_600.0,
+        }
+    }
+
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Seconds => "s",
+            Self::Minutes => "min",
+            Self::Hours => "h",
+        }
+    }
+}
+
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Pause {
@@ -973,6 +999,7 @@ struct AutoTyper {
     drop_pulse: DropPulse,
     plain_text: bool,
     options: Options,
+    duration_unit: DurationUnit,
     always_on_top: bool,
     status: Status,
     active: Option<ActiveRun>,
@@ -1734,7 +1761,7 @@ impl AutoTyper {
                         .inner_margin(12)
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
-                            pace_field(ui, &mut self.options, true);
+                            pace_field(ui, &mut self.options, &mut self.duration_unit, true);
                         });
                     ui.add_space(8.0);
                     compact_row(ui, 32.0, |ui| {
@@ -1776,10 +1803,12 @@ impl AutoTyper {
     fn actions(&mut self, ui: &mut egui::Ui) {
         if !self.reading {
             let ready = self.active.is_none() && self.capture.is_none();
-            ui.add_enabled_ui(ready, |ui| timing_fields(ui, &mut self.options, true));
+            ui.add_enabled_ui(ready, |ui| {
+                timing_fields(ui, &mut self.options, &mut self.duration_unit, true);
+            });
             ui.add_space(6.0);
         } else if self.timing_open {
-            timing_fields(ui, &mut self.options, false);
+            timing_fields(ui, &mut self.options, &mut self.duration_unit, false);
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Apply timing").clicked() {
                     self.apply_timing();
@@ -1947,7 +1976,12 @@ fn compact_row<R>(ui: &mut egui::Ui, height: f32, add: impl FnOnce(&mut egui::Ui
     .inner
 }
 
-fn timing_fields(ui: &mut egui::Ui, options: &mut Options, show_countdown: bool) {
+fn timing_fields(
+    ui: &mut egui::Ui,
+    options: &mut Options,
+    duration_unit: &mut DurationUnit,
+    show_countdown: bool,
+) {
     compact_row(ui, 34.0, |ui| {
         timing_modes(ui, options);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1955,7 +1989,7 @@ fn timing_fields(ui: &mut egui::Ui, options: &mut Options, show_countdown: bool)
         });
     });
     compact_row(ui, 34.0, |ui| {
-        pace_field(ui, options, false);
+        pace_field(ui, options, duration_unit, false);
         if show_countdown {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let input = countdown_field(ui, &mut options.countdown);
@@ -1995,7 +2029,12 @@ fn timing_modes(ui: &mut egui::Ui, options: &mut Options) {
         });
 }
 
-fn pace_field(ui: &mut egui::Ui, options: &mut Options, large: bool) {
+fn pace_field(
+    ui: &mut egui::Ui,
+    options: &mut Options,
+    duration_unit: &mut DurationUnit,
+    large: bool,
+) {
     let caption = match options.mode {
         TimingMode::Wpm => "Speed",
         TimingMode::Duration => "Typing time",
@@ -2018,13 +2057,9 @@ fn pace_field(ui: &mut egui::Ui, options: &mut Options, large: bool) {
                         .range(1..=600)
                         .suffix(" WPM"),
                 ),
-                TimingMode::Duration => ui.add(
-                    egui::DragValue::new(&mut options.total_seconds)
-                        .range(0.1..=86_400.0)
-                        .speed(0.1)
-                        .fixed_decimals(1)
-                        .suffix(" s"),
-                ),
+                TimingMode::Duration => {
+                    duration_field(ui, &mut options.total_seconds, duration_unit)
+                }
                 TimingMode::FinishAt => ui.add(
                     egui::TextEdit::singleline(&mut options.finish_at)
                         .desired_width(104.0)
@@ -2039,6 +2074,48 @@ fn pace_field(ui: &mut egui::Ui, options: &mut Options, large: bool) {
     if large {
         clock_hint(ui, options);
     }
+}
+
+fn duration_field(ui: &mut egui::Ui, seconds: &mut f64, unit: &mut DurationUnit) -> egui::Response {
+    ui.horizontal(|ui| {
+        let factor = unit.seconds();
+        let input = egui::DragValue::from_get_set(|value| {
+            if let Some(value) = value {
+                *seconds = (value * factor).clamp(0.1, 86_400.0);
+            }
+            *seconds / factor
+        })
+        .range(0.1 / factor..=86_400.0 / factor)
+        .speed(0.1);
+        let input = if *unit == DurationUnit::Seconds {
+            input.fixed_decimals(1)
+        } else {
+            let decimals = if *unit == DurationUnit::Minutes { 3 } else { 5 };
+            input.custom_formatter(move |value, _| {
+                format!("{value:.decimals$}")
+                    .trim_end_matches('0')
+                    .trim_end_matches('.')
+                    .to_owned()
+            })
+        };
+        let response = ui.add(input);
+        egui::ComboBox::from_id_salt("typing time unit")
+            .width(40.0)
+            .selected_text(unit.suffix())
+            .show_ui(ui, |ui| {
+                for (choice, label) in [
+                    (DurationUnit::Seconds, "Seconds"),
+                    (DurationUnit::Minutes, "Minutes"),
+                    (DurationUnit::Hours, "Hours"),
+                ] {
+                    ui.selectable_value(unit, choice, label);
+                }
+            })
+            .response
+            .on_hover_text("Typing time unit");
+        response
+    })
+    .inner
 }
 
 fn countdown_field(ui: &mut egui::Ui, seconds: &mut u32) -> egui::Response {
@@ -3066,6 +3143,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn typing_duration_units_convert_without_changing_the_schedule() {
+        let ctx = egui::Context::default();
+        let field_id = std::cell::Cell::new(egui::Id::NULL);
+        let frame = |seconds: &mut f64, unit: &mut DurationUnit, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    field_id.set(duration_field(ui, seconds, unit).id);
+                },
+            )
+        };
+        let mut seconds = 3_600.0;
+        for (mut unit, display) in [
+            (DurationUnit::Seconds, "3600.0"),
+            (DurationUnit::Minutes, "60"),
+            (DurationUnit::Hours, "1"),
+        ] {
+            let output = frame(&mut seconds, &mut unit, vec![]);
+            assert!(output.shapes.iter().any(|item| {
+                matches!(&item.shape, egui::epaint::Shape::Text(text) if text.galley.text() == display)
+            }), "missing {display}");
+            assert_eq!(seconds, 3_600.0);
+        }
+
+        let mut unit = DurationUnit::Hours;
+        ctx.memory_mut(|memory| memory.request_focus(field_id.get()));
+        let _ = frame(&mut seconds, &mut unit, vec![]);
+        let _ = frame(
+            &mut seconds,
+            &mut unit,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::A,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                },
+                egui::Event::Text("2.5".into()),
+            ],
+        );
+        assert_eq!(seconds, 9_000.0);
     }
 
     #[test]
